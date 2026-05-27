@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>RetroWeb Player</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #game { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+  <script>
+    // ── Gamepad Bridge (same-origin) ────────────────────────────────────
+    // The Gamepad API may not be activated in this iframe context.
+    // Since we're same-origin, we can directly call the parent window's
+    // navigator.getGamepads() which returns real, live Gamepad objects.
+    //
+    // We override both the instance method AND the prototype to ensure
+    // Emscripten/WebAssembly code paths (which may use Navigator.prototype)
+    // also go through our bridge.
+    (function() {
+      var parentGetGamepads = null;
+      try {
+        if (window.parent && window.parent.navigator && window.parent.navigator.getGamepads) {
+          parentGetGamepads = window.parent.navigator.getGamepads.bind(window.parent.navigator);
+        }
+      } catch(e) {}
+
+      if (parentGetGamepads) {
+        var bridgedGetGamepads = function() {
+          try { return parentGetGamepads(); }
+          catch(e) { return [null, null, null, null]; }
+        };
+
+        // Override on instance AND prototype to cover all access patterns
+        // (EmulatorJS/Emscripten may use Navigator.prototype.getGamepads)
+        navigator.getGamepads = bridgedGetGamepads;
+        try { Navigator.prototype.getGamepads = bridgedGetGamepads; } catch(e) {}
+
+        // Periodically re-apply the override in case EmulatorJS resets it
+        var ensureBridge = setInterval(function() {
+          try {
+            if (navigator.getGamepads !== bridgedGetGamepads) {
+              navigator.getGamepads = bridgedGetGamepads;
+            }
+            if (Navigator.prototype.getGamepads !== bridgedGetGamepads) {
+              Navigator.prototype.getGamepads = bridgedGetGamepads;
+            }
+          } catch(e) {}
+        }, 1000);
+        // Stop re-applying after 30s (EmulatorJS should be fully loaded by then)
+        setTimeout(function() { clearInterval(ensureBridge); }, 30000);
+
+        // Forward gamepadconnected/disconnected events from parent
+        function fireGamepadEvent(type, gamepad) {
+          try {
+            window.dispatchEvent(new GamepadEvent(type, { gamepad: gamepad }));
+          } catch(ex) {
+            var evt = new Event(type);
+            evt.gamepad = gamepad;
+            window.dispatchEvent(evt);
+          }
+        }
+
+        try {
+          window.parent.addEventListener('gamepadconnected', function(e) {
+            fireGamepadEvent('gamepadconnected', e.gamepad);
+          });
+          window.parent.addEventListener('gamepaddisconnected', function(e) {
+            fireGamepadEvent('gamepaddisconnected', e.gamepad);
+          });
+        } catch(e) {}
+
+        // Fire initial gamepadconnected events at multiple delays to ensure
+        // EmulatorJS catches them (CDN loading can take 1-5+ seconds)
+        function fireExistingGamepads() {
+          try {
+            var gps = parentGetGamepads();
+            for (var i = 0; i < gps.length; i++) {
+              if (gps[i]) fireGamepadEvent('gamepadconnected', gps[i]);
+            }
+          } catch(e) {}
+        }
+
+        // Fire at staggered intervals to cover EmulatorJS initialization
+        [500, 1500, 3000, 5000].forEach(function(delay) {
+          setTimeout(fireExistingGamepads, delay);
+        });
+      }
+    })();
+  </script>
+  <script>
+    var params = new URLSearchParams(window.location.search);
+    var core = params.get('core');
+    var gameUrl = params.get('url');
+    var gameName = params.get('name') || 'Game';
+
+    if (!core || !gameUrl) {
+      document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:sans-serif">Missing core or url parameter</p>';
+    } else {
+      // Clear cached EmulatorJS control settings so defaults apply fresh
+      try {
+        var keysToRemove = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var key = localStorage.key(i);
+          if (key && key.indexOf('-controls-') !== -1) keysToRemove.push(key);
+        }
+        keysToRemove.forEach(function(k) { localStorage.removeItem(k); });
+      } catch(e) {}
+
+      EJS_player = '#game';
+      EJS_core = core;
+      EJS_gameUrl = decodeURIComponent(gameUrl);
+      EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+      EJS_startOnLoaded = true;
+      EJS_gameName = decodeURIComponent(gameName);
+      EJS_color = '#6c5ce7';
+
+      // Default controls: value=keyboard, value2=gamepad
+      EJS_defaultControls = {
+        0: {
+          0:  { value: "x",           value2: "BUTTON_2" },
+          1:  { value: "s",           value2: "BUTTON_4" },
+          2:  { value: "v",           value2: "SELECT" },
+          3:  { value: "enter",       value2: "START" },
+          4:  { value: "up arrow",    value2: "DPAD_UP" },
+          5:  { value: "down arrow",  value2: "DPAD_DOWN" },
+          6:  { value: "left arrow",  value2: "DPAD_LEFT" },
+          7:  { value: "right arrow", value2: "DPAD_RIGHT" },
+          8:  { value: "z",           value2: "BUTTON_1" },
+          9:  { value: "a",           value2: "BUTTON_3" },
+          10: { value: "q",           value2: "LEFT_TOP_SHOULDER" },
+          11: { value: "e",           value2: "RIGHT_TOP_SHOULDER" },
+          12: { value: "tab",         value2: "LEFT_BOTTOM_SHOULDER" },
+          13: { value: "r",           value2: "RIGHT_BOTTOM_SHOULDER" },
+          14: { value: "",            value2: "LEFT_STICK" },
+          15: { value: "",            value2: "RIGHT_STICK" },
+          16: { value: "h",           value2: "LEFT_STICK_X:+1" },
+          17: { value: "f",           value2: "LEFT_STICK_X:-1" },
+          18: { value: "g",           value2: "LEFT_STICK_Y:+1" },
+          19: { value: "t",           value2: "LEFT_STICK_Y:-1" },
+          20: { value: "l",           value2: "RIGHT_STICK_X:+1" },
+          21: { value: "j",           value2: "RIGHT_STICK_X:-1" },
+          22: { value: "k",           value2: "RIGHT_STICK_Y:+1" },
+          23: { value: "i",           value2: "RIGHT_STICK_Y:-1" },
+        },
+        1: {}, 2: {}, 3: {}
+      };
+
+      var s = document.createElement('script');
+      s.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+      document.body.appendChild(s);
+    }
+  </script>
+</body>
+</html>

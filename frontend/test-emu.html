@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>EmulatorJS Test</title>
+  <style>
+    body { background: #111; color: #fff; font-family: sans-serif; margin: 20px; }
+    #game { width: 800px; height: 600px; }
+    .log { background: #222; padding: 10px; margin: 10px 0; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h2>EmulatorJS Standalone Test</h2>
+  <p>Testing: GBA / mgba core / Advance Wars ROM</p>
+  <div id="game"></div>
+  <div class="log" id="log"></div>
+
+  <script>
+    // Log interceptor
+    const logEl = document.getElementById('log');
+    const origError = console.error;
+    const origWarn = console.warn;
+    const origLog = console.log;
+    function addLog(type, args) {
+      const line = document.createElement('div');
+      line.style.color = type === 'error' ? '#e74c3c' : type === 'warn' ? '#f39c12' : '#aaa';
+      line.textContent = `[${type}] ${Array.from(args).map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    console.error = function() { addLog('error', arguments); origError.apply(console, arguments); };
+    console.warn = function() { addLog('warn', arguments); origWarn.apply(console, arguments); };
+    console.log = function() { addLog('log', arguments); origLog.apply(console, arguments); };
+
+    // Catch unhandled errors
+    window.addEventListener('error', e => addLog('error', [`Uncaught: ${e.message} at ${e.filename}:${e.lineno}`]));
+    window.addEventListener('unhandledrejection', e => addLog('error', [`Unhandled rejection: ${e.reason}`]));
+
+    // Test ROM URL first
+    const romUrl = '/api/roms/gba/' + encodeURIComponent('Advance Wars (USA) (Rev 1).zip');
+    addLog('log', [`Testing ROM URL: ${romUrl}`]);
+    fetch(romUrl).then(r => {
+      addLog('log', [`ROM fetch: ${r.status} ${r.statusText}, Content-Type: ${r.headers.get('content-type')}, Size: ${r.headers.get('content-length')}`]);
+    }).catch(e => addLog('error', [`ROM fetch failed: ${e}`]));
+
+    // EmulatorJS config
+    EJS_player = '#game';
+    EJS_core = 'mgba';
+    EJS_gameUrl = romUrl;
+    EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+    EJS_startOnLoaded = true;
+    EJS_gameName = 'Advance Wars';
+    EJS_color = '#6c5ce7';
+
+    addLog('log', [`EJS_core: ${EJS_core}`]);
+    addLog('log', [`EJS_gameUrl: ${EJS_gameUrl}`]);
+    addLog('log', [`EJS_pathtodata: ${EJS_pathtodata}`]);
+  </script>
+  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
+</body>
+</html>

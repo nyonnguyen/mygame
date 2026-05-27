@@ -1,0 +1,12 @@
+services:
+  retroweb:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ${ROM_DIR:-~/Documents/room-r36-plus}:/roms:ro
+    environment:
+      - ROM_DIR=/roms
+      - PORT=3000
+      - RUST_LOG=info
+    restart: unless-stopped

@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>RetroWeb</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app-bg"></div>
+  <div id="system-bg-overlay"></div>
+  <div id="app">
+    <!-- Header (hidden in kiosk mode) -->
+    <header id="header">
+      <div class="header-left">
+        <h1 class="logo" id="logo-btn">RetroWeb</h1>
+      </div>
+      <div class="header-center">
+        <input type="text" id="search-input" placeholder="Search games..." autocomplete="off" />
+      </div>
+      <div class="header-right">
+        <button id="controller-btn" class="icon-btn" title="Controllers">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/>
+            <path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>
+          </svg>
+          <span id="controller-count" class="badge hidden">0</span>
+        </button>
+        <button id="fullview-btn" class="icon-btn" title="FullView Mode">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+          </svg>
+        </button>
+        <button id="settings-btn" class="icon-btn" title="Settings">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <!-- Systems view -->
+      <div id="systems-view" class="view active">
+        <!-- Main navigation tabs -->
+        <div class="main-tabs">
+          <button class="main-tab active" data-main-tab="systems">Systems</button>
+          <button class="main-tab" data-main-tab="all-games">All Games</button>
+          <button class="main-tab" data-main-tab="favourites">Favourites</button>
+        </div>
+
+        <!-- Systems tab content -->
+        <div id="main-tab-systems" class="main-tab-content active">
+          <div id="systems-grid" class="systems-grid"></div>
+        </div>
+
+        <!-- All Games tab content -->
+        <div id="main-tab-all-games" class="main-tab-content">
+          <div class="games-toolbar">
+            <span id="all-games-count" class="game-count"></span>
+            <div class="toolbar-controls">
+              <select id="all-games-sort" class="setting-input compact-select">
+                <option value="name-asc">Name A-Z</option>
+                <option value="name-desc">Name Z-A</option>
+                <option value="system">By System</option>
+              </select>
+              <select id="all-games-system-filter" class="setting-input compact-select">
+                <option value="">All Systems</option>
+              </select>
+            </div>
+          </div>
+          <div id="all-games-grid" class="games-grid"></div>
+        </div>
+
+        <!-- Favourites tab content -->
+        <div id="main-tab-favourites" class="main-tab-content">
+          <div class="games-toolbar">
+            <span id="fav-games-count" class="game-count"></span>
+            <div class="toolbar-controls">
+              <select id="fav-games-sort" class="setting-input compact-select">
+                <option value="name-asc">Name A-Z</option>
+                <option value="name-desc">Name Z-A</option>
+                <option value="system">By System</option>
+                <option value="recent">Recently Added</option>
+              </select>
+            </div>
+          </div>
+          <div id="fav-games-grid" class="games-grid"></div>
+          <div id="fav-empty" class="empty-state hidden">
+            <div class="empty-icon">&#9825;</div>
+            <p>No favourite games yet.</p>
+            <p class="setting-hint">Click the heart on any game to add it here.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Games view (per-system) -->
+      <div id="games-view" class="view">
+        <div class="games-header">
+          <button id="back-btn" class="back-btn">&larr; Systems</button>
+          <h2 id="system-title"></h2>
+          <span id="game-count" class="game-count"></span>
+          <div class="toolbar-controls">
+            <select id="system-games-sort" class="setting-input compact-select">
+              <option value="name-asc">Name A-Z</option>
+              <option value="name-desc">Name Z-A</option>
+            </select>
+          </div>
+        </div>
+        <div id="games-grid" class="games-grid"></div>
+      </div>
+
+      <!-- Game Detail view -->
+      <div id="detail-view" class="view">
+        <div id="detail-backdrop" class="detail-backdrop">
+          <img id="detail-backdrop-img" class="detail-backdrop-img" alt="" />
+          <div class="detail-backdrop-gradient"></div>
+        </div>
+        <div class="detail-header">
+          <button id="detail-back-btn" class="back-btn">&larr; Back</button>
+          <h2 id="detail-title"></h2>
+        </div>
+        <div class="detail-content">
+          <div class="detail-hero">
+            <div class="detail-cover" id="detail-cover"></div>
+            <div class="detail-sidebar">
+              <div class="detail-actions">
+                <button class="detail-play-btn" id="detail-play-btn">&#9654; Play</button>
+                <button class="detail-action-btn" id="detail-scrape-art-btn" title="Download box art">&#128247; Art</button>
+                <button class="detail-action-btn" id="detail-scrape-info-btn" title="Download game info">&#128269; Info</button>
+                <button class="detail-action-btn" id="detail-search-media-btn" title="Search YouTube gameplay &amp; screenshots">&#127916; Media</button>
+              </div>
+              <div class="detail-meta" id="detail-meta">
+                <div class="detail-meta-loading">Loading metadata...</div>
+              </div>
+            </div>
+          </div>
+          <div class="detail-tabs">
+            <button class="detail-tab active" data-detail-tab="overview">Overview</button>
+            <button class="detail-tab" data-detail-tab="gameplay">Gameplay</button>
+            <button class="detail-tab" data-detail-tab="screenshots">Screenshots</button>
+          </div>
+          <div id="detail-tab-overview" class="detail-tab-content active">
+            <div id="detail-description" class="detail-description"></div>
+          </div>
+          <div id="detail-tab-gameplay" class="detail-tab-content">
+            <div id="detail-gameplay" class="detail-gameplay"></div>
+            <div id="detail-videos" class="detail-videos"></div>
+          </div>
+          <div id="detail-tab-screenshots" class="detail-tab-content">
+            <div id="detail-screenshots" class="detail-screenshots"></div>
+          </div>
+        </div>
+        <div id="detail-scrape-status" class="detail-scrape-status hidden"></div>
+      </div>
+
+      <!-- Player view -->
+      <div id="player-view" class="view">
+        <div class="player-header">
+          <button id="player-back-btn" class="back-btn">&larr; Back</button>
+          <h2 id="player-title"></h2>
+          <div class="player-controls">
+            <button id="fullscreen-btn" class="icon-btn" title="Fullscreen">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="emulator-container" class="emulator-container">
+          <div id="game"></div>
+        </div>
+      </div>
+
+      <!-- Settings view (tabbed) -->
+      <div id="settings-view" class="view">
+        <div class="settings-page">
+          <div class="settings-header">
+            <button id="settings-back-btn" class="back-btn">&larr; Back</button>
+            <h2>Settings</h2>
+          </div>
+
+          <!-- Tabs -->
+          <div class="settings-tabs">
+            <button class="settings-tab active" data-tab="appearance">Appearance</button>
+            <button class="settings-tab" data-tab="roms">ROMs</button>
+            <button class="settings-tab" data-tab="bios">BIOS</button>
+            <button class="settings-tab" data-tab="hotkeys">Hotkeys</button>
+            <button class="settings-tab" data-tab="controller">Controller</button>
+          </div>
+
+          <!-- Appearance Tab -->
+          <div id="tab-appearance" class="settings-tab-content active">
+            <section class="settings-section">
+              <h3>Console Theme</h3>
+              <p class="setting-hint">Choose a console-inspired theme. Each theme matches the look and feel of that console's launcher.</p>
+              <div id="theme-grid" class="theme-grid"></div>
+              <div id="custom-theme-editor" class="custom-theme-editor">
+                <p class="setting-hint" style="margin-top:0;margin-bottom:12px;">Customize your own theme colors:</p>
+                <div class="custom-theme-colors">
+                  <div class="custom-color-field"><label>Background</label><input type="color" id="custom-bg" value="#1a1a2e" /></div>
+                  <div class="custom-color-field"><label>Cards</label><input type="color" id="custom-card" value="#242444" /></div>
+                  <div class="custom-color-field"><label>Header</label><input type="color" id="custom-header" value="#16162a" /></div>
+                  <div class="custom-color-field"><label>Text</label><input type="color" id="custom-text" value="#f0eef5" /></div>
+                  <div class="custom-color-field"><label>Accent</label><input type="color" id="custom-accent" value="#6c48c4" /></div>
+                  <div class="custom-color-field"><label>Border</label><input type="color" id="custom-border" value="#3a3860" /></div>
+                </div>
+                <button id="apply-custom-theme" class="action-btn">Apply Custom Theme</button>
+              </div>
+            </section>
+            <!-- FullView now uses the same theme as the main app -->
+          </div>
+
+          <!-- ROMs Tab -->
+          <div id="tab-roms" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>ROM Directory</h3>
+              <div class="setting-row">
+                <input type="text" id="rom-dir-input" class="setting-input" placeholder="/path/to/roms" />
+                <button id="browse-rom-dir-btn" class="action-btn">Browse</button>
+                <button id="save-rom-dir-btn" class="action-btn">Save</button>
+                <button id="rescan-btn" class="action-btn">Rescan</button>
+              </div>
+              <p id="rom-dir-status" class="setting-hint"></p>
+              <!-- Scan Progress Panel -->
+              <div id="scan-progress-panel" class="progress-panel hidden">
+                <div class="progress-header">
+                  <span id="scan-progress-title">Scanning...</span>
+                  <span id="scan-progress-count" class="progress-count"></span>
+                </div>
+                <div class="progress-bar-container">
+                  <div id="scan-progress-bar" class="progress-bar"></div>
+                </div>
+                <div id="scan-progress-log" class="progress-log"></div>
+              </div>
+            </section>
+            <section class="settings-section">
+              <h3>Thumbnail Scraper</h3>
+              <p class="setting-hint">Downloads box art from a libretro-thumbnails compatible server.<br>
+                URL format: <code>{source}/{System Name}/Named_Boxarts/{Game}.png</code></p>
+              <div style="margin-top:8px;">
+                <label class="mapping-toolbar-label">Sources (first = primary, others = fallback):</label>
+                <div id="scrape-sources-list" class="scrape-sources-list"></div>
+                <div style="margin-top:8px;">
+                  <label class="mapping-toolbar-label" style="font-size:0.8rem; color:var(--text-dim);">Add from known servers:</label>
+                  <div id="scrape-known-sources" class="scrape-known-grid"></div>
+                </div>
+                <div class="setting-row" style="margin-top:6px;">
+                  <input type="text" id="scrape-source-add-input" class="setting-input" placeholder="Custom URL..." />
+                  <button id="scrape-source-add-btn" class="action-btn sm">Add</button>
+                </div>
+              </div>
+              <div class="setting-row" style="margin-top:6px;">
+                <label class="mapping-toolbar-label" style="min-width:60px;">Delay:</label>
+                <input type="number" id="scrape-delay-input" class="setting-input" style="max-width:100px;min-width:80px;" placeholder="100" min="0" max="5000" />
+                <span class="setting-hint" style="margin:0;">ms between requests</span>
+              </div>
+              <div class="setting-row" style="margin-top:8px;">
+                <label class="setting-toggle">
+                  <input type="checkbox" id="ddg-fallback-input" />
+                  <span>DuckDuckGo image fallback</span>
+                </label>
+                <span class="setting-hint" style="margin:0; margin-left:8px;">Search DuckDuckGo when all sources fail</span>
+              </div>
+              <div class="setting-row" style="margin-top:8px;">
+                <button id="save-scrape-settings-btn" class="action-btn">Save Scrape Settings</button>
+              </div>
+              <p id="scrape-settings-status" class="setting-hint"></p>
+              <!-- Scrape section: system selector + run -->
+              <div style="margin-top:12px; border-top: 1px solid var(--border); padding-top: 12px;">
+                <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:8px;">Scrape Thumbnails</h4>
+                <div class="setting-row">
+                  <select id="scrape-system-select" class="setting-input compact-select" style="min-width:200px;">
+                    <option value="">-- Select System --</option>
+                  </select>
+                  <button id="scrape-run-btn" class="action-btn">Scrape</button>
+                  <button id="scrape-all-btn" class="action-btn">Scrape All</button>
+                </div>
+              </div>
+              <!-- Scrape Progress Panel -->
+              <div id="scrape-progress-panel" class="progress-panel hidden" style="margin-top:10px;">
+                <div class="progress-header">
+                  <span id="scrape-progress-title">Scraping...</span>
+                  <span id="scrape-progress-count" class="progress-count"></span>
+                </div>
+                <div class="progress-bar-container">
+                  <div id="scrape-progress-bar" class="progress-bar"></div>
+                </div>
+                <div id="scrape-progress-log" class="progress-log"></div>
+              </div>
+            </section>
+            <section class="settings-section">
+              <h3>Game Info Scraper</h3>
+              <p class="setting-hint">Downloads game descriptions, publisher, developer, year, genre from online databases.<br>
+                <strong>Primary:</strong> ScreenScraper.fr (best for retro games) &rarr; <strong>Fallback:</strong> RAWG.io (broader database)</p>
+              <div class="setting-row" style="margin-top:8px;">
+                <label class="setting-toggle">
+                  <input type="checkbox" id="scrape-metadata-input" />
+                  <span>Auto-scrape metadata with thumbnails</span>
+                </label>
+                <span class="setting-hint" style="margin:0; margin-left:8px;">Also fetch game info when scraping art</span>
+              </div>
+              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">ScreenScraper.fr Credentials (recommended, tried first):</label>
+                <div class="setting-row">
+                  <input type="text" id="ss-user-input" class="setting-input" placeholder="Username" style="max-width:200px;" autocomplete="off" />
+                  <input type="password" id="ss-pass-input" class="setting-input" placeholder="Password" style="max-width:200px;" autocomplete="off" />
+                </div>
+                <p class="setting-hint">Free account at <a href="https://www.screenscraper.fr" target="_blank" style="color:var(--accent);">screenscraper.fr</a>. Best source for retro game metadata.</p>
+              </div>
+              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">RAWG.io API Key (fallback):</label>
+                <div class="setting-row">
+                  <input type="text" id="rawg-key-input" class="setting-input" placeholder="API Key" style="max-width:400px;" autocomplete="off" />
+                </div>
+                <p class="setting-hint">Free key at <a href="https://rawg.io/apidocs" target="_blank" style="color:var(--accent);">rawg.io/apidocs</a>. Used as fallback when ScreenScraper misses.</p>
+              </div>
+              <div class="setting-row" style="margin-top:8px;">
+                <button id="save-info-settings-btn" class="action-btn">Save Info Settings</button>
+              </div>
+              <p id="info-settings-status" class="setting-hint"></p>
+              <!-- Scrape Info section: system selector + run -->
+              <div style="margin-top:12px; border-top: 1px solid var(--border); padding-top: 12px;">
+                <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:8px;">Scrape Game Info</h4>
+                <div class="setting-row">
+                  <select id="scrape-info-system-select" class="setting-input compact-select" style="min-width:200px;">
+                    <option value="">-- Select System --</option>
+                  </select>
+                  <button id="scrape-info-run-btn" class="action-btn">Scrape Info</button>
+                  <button id="scrape-info-all-btn" class="action-btn">Scrape All Info</button>
+                </div>
+              </div>
+              <!-- Info Scrape Progress Panel -->
+              <div id="scrape-info-progress-panel" class="progress-panel hidden" style="margin-top:10px;">
+                <div class="progress-header">
+                  <span id="scrape-info-progress-title">Scraping info...</span>
+                  <span id="scrape-info-progress-count" class="progress-count"></span>
+                </div>
+                <div class="progress-bar-container">
+                  <div id="scrape-info-progress-bar" class="progress-bar"></div>
+                </div>
+                <div id="scrape-info-progress-log" class="progress-log"></div>
+              </div>
+            </section>
+          </div>
+
+          <!-- BIOS Tab -->
+          <div id="tab-bios" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>BIOS Files</h3>
+              <div id="bios-status-list" class="bios-list"></div>
+            </section>
+          </div>
+
+          <!-- Hotkeys Tab -->
+          <div id="tab-hotkeys" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>Hotkey Combos</h3>
+              <p class="setting-hint">Controls during gameplay. Works with both keyboard and controller.</p>
+              <div id="hotkey-input-status" class="hotkey-input-status">
+                <span id="hotkey-keyboard-status" class="input-device-badge keyboard-badge">Keyboard</span>
+                <span id="hotkey-controller-status" class="input-device-badge controller-badge hidden">Controller</span>
+              </div>
+              <div class="setting-row" style="margin-top:8px;">
+                <label class="mapping-toolbar-label">Hotkey Button:</label>
+                <select id="hotkey-base-btn" class="setting-input compact-select">
+                  <option value="select">Select</option>
+                  <option value="home">Home / PS</option>
+                  <option value="l3">L3</option>
+                  <option value="r3">R3</option>
+                </select>
+              </div>
+              <div id="hotkey-combos-list" class="hotkey-combos-list"></div>
+              <button id="hotkey-save-btn" class="action-btn" style="margin-top:10px;">Save Hotkeys</button>
+              <button id="hotkey-reset-btn" class="action-btn sm danger" style="margin-top:10px;margin-left:6px;">Reset Defaults</button>
+            </section>
+          </div>
+
+          <!-- Controller Tab -->
+          <div id="tab-controller" class="settings-tab-content">
+            <div id="settings-controller-list" class="controller-cards-list"></div>
+            <p class="setting-hint" style="margin-top:8px;">Press any button on your controller to detect it. Controller mapping is shown below even without a connected controller.</p>
+
+            <!-- Default controller mapping (shown when no controller connected) -->
+            <div id="default-controller-section" class="settings-section" style="margin-top:12px;">
+              <h3>Controller Mapping Reference</h3>
+              <div class="setting-row" style="margin-bottom:8px;">
+                <label class="mapping-toolbar-label">Controller Type:</label>
+                <select id="default-controller-profile" class="setting-input compact-select">
+                  <option value="xbox">Xbox</option>
+                  <option value="playstation">PlayStation</option>
+                  <option value="switch">Switch</option>
+                  <option value="8bitdo">8BitDo</option>
+                  <option value="generic">Generic</option>
+                </select>
+              </div>
+              <div id="default-controller-svg" class="controller-svg-container"></div>
+              <div id="default-controller-mapping" class="default-mapping-grid"></div>
+            </div>
+
+            <!-- Mapping listen overlay (global) -->
+            <div id="mapping-listen-overlay" class="mapping-listen-overlay hidden">
+              <div class="mapping-listen-content">
+                <div class="mapping-listen-pulse"></div>
+                <span id="mapping-listen-label">Press a button for: <strong>A</strong></span>
+                <button id="mapping-listen-cancel" class="back-btn" style="margin-top:12px;">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Kiosk mode overlay -->
+      <div id="kiosk-view" class="kiosk-view hidden">
+        <div class="kiosk-bg"></div>
+        <div class="kiosk-header">
+          <h1 class="kiosk-title">RetroWeb</h1>
+          <div id="kiosk-clock" class="kiosk-clock"></div>
+        </div>
+        <div class="kiosk-systems">
+          <div id="kiosk-system-wheel" class="kiosk-system-wheel"></div>
+        </div>
+        <div class="kiosk-games">
+          <h2 id="kiosk-system-name" class="kiosk-system-name"></h2>
+          <div class="kiosk-game-count-bar">
+            <span id="kiosk-game-counter" class="kiosk-game-counter"></span>
+          </div>
+          <div id="kiosk-games-carousel" class="kiosk-games-carousel"></div>
+        </div>
+        <div class="kiosk-footer">
+          <div class="kiosk-controls-guide">
+            <span class="kiosk-key">&#x25C0;&#x25B6;</span> Games
+            <span class="kiosk-sep">|</span>
+            <span class="kiosk-key">&#x25B2;&#x25BC;</span> System
+            <span class="kiosk-sep">|</span>
+            <span class="kiosk-key">A</span> Play
+            <span class="kiosk-sep">|</span>
+            <span class="kiosk-key">Y</span> Game Info
+            <span class="kiosk-sep">|</span>
+            <span class="kiosk-key">X</span> Platform
+            <span class="kiosk-sep">|</span>
+            <span class="kiosk-key">Start</span> Exit
+          </div>
+        </div>
+
+        <!-- FullView detail overlay (game or platform) -->
+        <div id="kiosk-detail-overlay" class="kiosk-detail-overlay hidden">
+          <div class="kiosk-detail-card">
+            <button id="kiosk-detail-close-btn" class="kiosk-detail-close" title="Close">&times;</button>
+            <div class="kiosk-detail-eyebrow" id="kiosk-detail-eyebrow"></div>
+            <h2 class="kiosk-detail-title" id="kiosk-detail-title"></h2>
+            <div class="kiosk-detail-body">
+              <div class="kiosk-detail-cover" id="kiosk-detail-cover">
+                <div class="placeholder">&#127918;</div>
+              </div>
+              <div class="kiosk-detail-info">
+                <div class="kiosk-detail-meta" id="kiosk-detail-meta"></div>
+                <div class="kiosk-detail-desc" id="kiosk-detail-desc"></div>
+              </div>
+            </div>
+            <div class="kiosk-detail-actions" id="kiosk-detail-actions">
+              <button id="kiosk-detail-play-btn" class="kiosk-detail-btn primary">&#9654; Play</button>
+              <button id="kiosk-detail-back-btn" class="kiosk-detail-btn">&larr; Back</button>
+            </div>
+            <div class="kiosk-detail-hint">
+              <span class="kiosk-key">A</span> Play
+              <span class="kiosk-sep">|</span>
+              <span class="kiosk-key">B/Y</span> Close
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controller modal (quick view from header) -->
+      <div id="controller-modal" class="modal hidden">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2>Controllers</h2>
+            <button id="close-modal-btn" class="close-btn">&times;</button>
+          </div>
+          <div id="controller-list" class="controller-list">
+            <p class="no-controllers">No controllers detected. Connect a gamepad and press any button.</p>
+          </div>
+          <div class="controller-help">
+            <h3>Supported Controllers</h3>
+            <ul>
+              <li><strong>Xbox</strong> (One, Series, 360) &mdash; 17 buttons</li>
+              <li><strong>PlayStation</strong> (DS4, DualSense) &mdash; 18 buttons incl. touchpad</li>
+              <li><strong>Nintendo Switch Pro</strong> &mdash; A/B X/Y auto-swapped</li>
+              <li><strong>8BitDo</strong> &mdash; auto-mapped</li>
+              <li><strong>Generic USB HID</strong> &mdash; standard fallback</li>
+            </ul>
+            <p class="hint">Go to Settings &rarr; Controller to remap buttons and manage profiles.</p>
+          </div>
+        </div>
+      </div>
+      <!-- Game Detail Modal -->
+      <div id="game-detail-modal" class="modal hidden">
+        <div class="modal-content" style="max-width:640px;">
+          <div class="modal-header">
+            <h2 id="game-detail-title">Game Info</h2>
+            <button id="game-detail-close-btn" class="close-btn">&times;</button>
+          </div>
+          <div id="game-detail-body" class="game-detail-body"></div>
+        </div>
+      </div>
+      <!-- Folder Browser Modal -->
+      <div id="browse-modal" class="modal hidden">
+        <div class="modal-content" style="max-width:600px;">
+          <div class="modal-header">
+            <h2>Select ROM Directory</h2>
+            <button id="browse-close-btn" class="close-btn">&times;</button>
+          </div>
+          <div class="browse-path-bar">
+            <input type="text" id="browse-path-input" class="setting-input" placeholder="/" style="font-size:0.85rem;" />
+            <button id="browse-go-btn" class="action-btn sm">Go</button>
+            <button id="browse-up-btn" class="action-btn sm">Up</button>
+          </div>
+          <div id="browse-dirs-list" class="browse-dirs-list"></div>
+          <div class="browse-footer">
+            <button id="browse-select-btn" class="action-btn">Select This Folder</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/src/main.ts" type="module"></script>
+</body>
+</html>
