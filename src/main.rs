@@ -1,5 +1,6 @@
 use axum::{
     Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
@@ -29,6 +30,95 @@ struct AppInner {
     library: RwLock<GameLibrary>,
     data_dir: PathBuf,
     settings: RwLock<AppSettings>,
+    playtime: RwLock<HashMap<String, PlaytimeStats>>,
+    collections: RwLock<Vec<Collection>>,
+    game_configs: RwLock<HashMap<String, GameLaunchConfig>>,
+    hidden_games: RwLock<HashSet<String>>,
+    duplicates: RwLock<Vec<DuplicateGroup>>,
+    log_buffer: RwLock<std::collections::VecDeque<LogEntry>>,
+}
+
+// ── Playtime ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PlaytimeStats {
+    game_id: String,
+    system: String,
+    file: String,
+    name: String,
+    total_seconds: u64,
+    last_played_at: u64,
+    play_count: u32,
+}
+
+#[derive(Deserialize)]
+struct PlaytimeStartBody {
+    game_id: String,
+    system: String,
+    file: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct PlaytimeEndBody {
+    game_id: String,
+    duration_seconds: u64,
+}
+
+// ── Collections ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct Collection {
+    id: String,
+    name: String,
+    icon: Option<String>,
+    game_ids: Vec<String>,
+    created_at: u64,
+}
+
+#[derive(Deserialize)]
+struct CollectionCreateBody {
+    name: String,
+    icon: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CollectionUpdateBody {
+    name: Option<String>,
+    icon: Option<String>,
+    game_ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct CollectionGameBody {
+    game_id: String,
+}
+
+// ── Game Launch Config ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GameLaunchConfig {
+    core: Option<String>,
+    shader: Option<String>,
+    options: Option<HashMap<String, String>>,
+}
+
+// ── Duplicates ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DuplicateGroup {
+    hash: String,
+    size: u64,
+    games: Vec<GameInfo>,
+}
+
+// ── Logging ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct LogEntry {
+    timestamp: u64,
+    level: String,
+    message: String,
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -56,6 +146,18 @@ struct AppSettings {
     screenscraper_pass: Option<String>,
     #[serde(default)]
     rawg_api_key: Option<String>,
+    #[serde(default)]
+    steamgriddb_api_key: Option<String>,
+    #[serde(default)]
+    autoplay_previews: bool,
+    #[serde(default)]
+    cloud_sync_url: Option<String>,
+    #[serde(default)]
+    cloud_sync_user: Option<String>,
+    #[serde(default)]
+    cloud_sync_pass: Option<String>,
+    #[serde(default)]
+    auto_backup_saves: bool,
 }
 
 fn default_scrape_sources() -> Vec<String> {
@@ -84,6 +186,12 @@ impl Default for AppSettings {
             screenscraper_user: None,
             screenscraper_pass: None,
             rawg_api_key: None,
+            steamgriddb_api_key: None,
+            autoplay_previews: false,
+            cloud_sync_url: None,
+            cloud_sync_user: None,
+            cloud_sync_pass: None,
+            auto_backup_saves: false,
         }
     }
 }
@@ -96,6 +204,7 @@ struct SystemInfo {
     name: String,
     game_count: usize,
     core: &'static str,
+    cover_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +227,8 @@ struct GameLibrary {
 struct GamesQuery {
     system: Option<String>,
     search: Option<String>,
+    #[serde(default)]
+    include_hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -225,6 +336,25 @@ fn system_metadata() -> HashMap<&'static str, SystemMeta> {
     m
 }
 
+/// Alternate cores per system — for per-game launch config / multi-emulator support.
+/// First entry is always the default core.
+fn alternate_cores(system_id: &str) -> Vec<&'static str> {
+    match system_id {
+        "nes" | "famicom" | "fds" => vec!["fceumm", "nestopia"],
+        "snes" | "sfc" => vec!["snes9x", "bsnes"],
+        "n64" => vec!["mupen64plus_next", "parallel_n64"],
+        "psx" => vec!["pcsx_rearmed", "mednafen_psx_hw"],
+        "genesis" | "megadrive" => vec!["genesis_plus_gx", "genesis_plus_gx_wide", "picodrive"],
+        "mastersystem" | "gamegear" => vec!["genesis_plus_gx", "picodrive"],
+        "arcade" | "neogeo" | "cps1" | "cps2" | "cps3" | "fbneo" => vec!["fbneo", "mame2003", "mame2003_plus"],
+        "mame" => vec!["mame2003", "mame2003_plus", "fbneo"],
+        _ => {
+            let meta = system_metadata();
+            meta.get(system_id).map(|m| vec![m.core]).unwrap_or_default()
+        }
+    }
+}
+
 // ── BIOS definitions ────────────────────────────────────────────────────────
 
 fn bios_definitions() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)> {
@@ -294,7 +424,7 @@ fn libretro_system_name(system_id: &str) -> Option<&'static str> {
 
 // ── ROM scanning ────────────────────────────────────────────────────────────
 
-fn scan_rom_directory(rom_dir: &std::path::Path) -> GameLibrary {
+fn scan_rom_directory(rom_dir: &std::path::Path, data_dir: &std::path::Path) -> GameLibrary {
     let meta = system_metadata();
     let mut systems = Vec::new();
     let mut games: HashMap<String, Vec<GameInfo>> = HashMap::new();
@@ -359,7 +489,8 @@ fn scan_rom_directory(rom_dir: &std::path::Path) -> GameLibrary {
         system_games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         if !system_games.is_empty() {
             let count = system_games.len();
-            systems.push(SystemInfo { id: dir_name.clone(), name: system_name, game_count: count, core });
+            let cover_image = pick_system_cover(&system_games, data_dir, &dir_name);
+            systems.push(SystemInfo { id: dir_name.clone(), name: system_name, game_count: count, core, cover_image });
             games.insert(dir_name, system_games);
         }
     }
@@ -367,6 +498,28 @@ fn scan_rom_directory(rom_dir: &std::path::Path) -> GameLibrary {
     systems.sort_by(|a, b| b.game_count.cmp(&a.game_count));
     info!("Scanned {} systems with {} total games", systems.len(), games.values().map(|g| g.len()).sum::<usize>());
     GameLibrary { systems, games }
+}
+
+fn system_art_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("system-art")
+}
+
+fn system_art_path(data_dir: &std::path::Path, system: &str) -> Option<PathBuf> {
+    let dir = system_art_dir(data_dir);
+    let png = dir.join(format!("{}.png", system));
+    if png.exists() { return Some(png); }
+    let jpg = dir.join(format!("{}.jpg", system));
+    if jpg.exists() { return Some(jpg); }
+    None
+}
+
+fn pick_system_cover(games: &[GameInfo], data_dir: &std::path::Path, system_id: &str) -> Option<String> {
+    if system_art_path(data_dir, system_id).is_some() {
+        return Some(format!("/api/system-art/{}", system_id));
+    }
+    let with_images: Vec<&GameInfo> = games.iter().filter(|g| g.has_image).collect();
+    if with_images.is_empty() { return None; }
+    with_images[with_images.len() / 2].image_path.clone()
 }
 
 fn clean_game_name(filename: &str) -> String {
@@ -458,6 +611,97 @@ fn sanitize_filename(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
 }
 
+// ── Playtime persistence ────────────────────────────────────────────────────
+
+fn playtime_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("playtime.json")
+}
+
+fn load_playtime(data_dir: &std::path::Path) -> HashMap<String, PlaytimeStats> {
+    let path = playtime_path(data_dir);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_playtime(data_dir: &std::path::Path, playtime: &HashMap<String, PlaytimeStats>) {
+    let path = playtime_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(playtime) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ── Collections persistence ────────────────────────────────────────────────
+
+fn collections_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("collections.json")
+}
+
+fn load_collections(data_dir: &std::path::Path) -> Vec<Collection> {
+    let path = collections_path(data_dir);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_collections(data_dir: &std::path::Path, collections: &[Collection]) {
+    let path = collections_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(collections) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+// ── Game launch config persistence ─────────────────────────────────────────
+
+fn game_config_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("game-configs.json")
+}
+
+fn load_game_configs(data_dir: &std::path::Path) -> HashMap<String, GameLaunchConfig> {
+    let path = game_config_path(data_dir);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_game_configs(data_dir: &std::path::Path, configs: &HashMap<String, GameLaunchConfig>) {
+    let path = game_config_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(configs) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+// ── Hidden games persistence ───────────────────────────────────────────────
+
+fn hidden_games_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("hidden-games.json")
+}
+
+fn load_hidden_games(data_dir: &std::path::Path) -> HashSet<String> {
+    let path = hidden_games_path(data_dir);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_hidden_games(data_dir: &std::path::Path, hidden: &HashSet<String>) {
+    let path = hidden_games_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(hidden) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn get_systems(State(state): State<AppState>) -> Json<Vec<SystemInfo>> {
@@ -471,6 +715,12 @@ async fn get_games(State(state): State<AppState>, Query(params): Query<GamesQuer
     } else {
         lib.games.values().flatten().cloned().collect()
     };
+    if !params.include_hidden {
+        let hidden = state.inner.hidden_games.read().await;
+        if !hidden.is_empty() {
+            results.retain(|g| !hidden.contains(&g.id));
+        }
+    }
     if let Some(search) = &params.search {
         let s = search.to_lowercase();
         results.retain(|g| g.name.to_lowercase().contains(&s));
@@ -563,7 +813,7 @@ async fn update_settings(State(state): State<AppState>, Json(new_settings): Json
     if rom_dir_changed {
         let new_path = PathBuf::from(&new_settings.rom_dir);
         if new_path.exists() {
-            let library = scan_rom_directory(&new_path);
+            let library = scan_rom_directory(&new_path, &state.inner.data_dir);
             *state.inner.rom_dir.write().await = new_path;
             *state.inner.library.write().await = library;
             info!("ROM directory changed to: {}", new_settings.rom_dir);
@@ -577,7 +827,7 @@ async fn update_settings(State(state): State<AppState>, Json(new_settings): Json
 
 async fn rescan_roms(State(state): State<AppState>) -> Json<serde_json::Value> {
     let rom_dir = state.inner.rom_dir.read().await.clone();
-    let library = scan_rom_directory(&rom_dir);
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
     let system_count = library.systems.len();
     let game_count: usize = library.games.values().map(|g| g.len()).sum();
     *state.inner.library.write().await = library;
@@ -1305,7 +1555,7 @@ async fn scrape_system(State(state): State<AppState>, Path(system): Path<String>
 
     // Rescan library to pick up new images
     let rom_dir2 = state.inner.rom_dir.read().await.clone();
-    let library = scan_rom_directory(&rom_dir2);
+    let library = scan_rom_directory(&rom_dir2, &state.inner.data_dir);
     *state.inner.library.write().await = library;
 
     Json(ScrapeResult { system, total, scraped, skipped, already_have, not_found, errors, messages })
@@ -1340,7 +1590,7 @@ async fn browse_dirs(Json(req): Json<BrowseRequest>) -> Json<BrowseResponse> {
 
 // ── SSE Rescan with progress ─────────────────────────────────────────────────
 
-fn scan_rom_directory_with_progress(rom_dir: &std::path::Path, tx: tokio::sync::mpsc::Sender<String>) -> GameLibrary {
+fn scan_rom_directory_with_progress(rom_dir: &std::path::Path, data_dir: &std::path::Path, tx: tokio::sync::mpsc::Sender<String>) -> GameLibrary {
     let meta = system_metadata();
     let mut systems = Vec::new();
     let mut games: HashMap<String, Vec<GameInfo>> = HashMap::new();
@@ -1419,7 +1669,8 @@ fn scan_rom_directory_with_progress(rom_dir: &std::path::Path, tx: tokio::sync::
         system_games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         let count = system_games.len();
         if !system_games.is_empty() {
-            systems.push(SystemInfo { id: dir_name.clone(), name: system_name.clone(), game_count: count, core });
+            let cover_image = pick_system_cover(&system_games, data_dir, &dir_name);
+            systems.push(SystemInfo { id: dir_name.clone(), name: system_name.clone(), game_count: count, core, cover_image });
             games.insert(dir_name.clone(), system_games);
         }
 
@@ -1440,13 +1691,14 @@ fn scan_rom_directory_with_progress(rom_dir: &std::path::Path, tx: tokio::sync::
 
 async fn rescan_stream(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rom_dir = state.inner.rom_dir.read().await.clone();
+    let data_dir = state.inner.data_dir.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(100);
     let state_clone = state.clone();
 
     tokio::spawn(async move {
         let tx_clone = tx.clone();
         let library = tokio::task::spawn_blocking(move || {
-            scan_rom_directory_with_progress(&rom_dir, tx_clone)
+            scan_rom_directory_with_progress(&rom_dir, &data_dir, tx_clone)
         }).await.unwrap_or_default();
 
         let system_count = library.systems.len();
@@ -1616,7 +1868,7 @@ async fn scrape_stream(State(state): State<AppState>, Path(system): Path<String>
 
         // Rescan library
         let rom_dir2 = state_clone.inner.rom_dir.read().await.clone();
-        let library = scan_rom_directory(&rom_dir2);
+        let library = scan_rom_directory(&rom_dir2, &state_clone.inner.data_dir);
         *state_clone.inner.library.write().await = library;
 
         let _ = tx.send(serde_json::json!({
@@ -1674,7 +1926,7 @@ async fn scrape_art_single(
             if fs::write(&save_path, &bytes).await.is_ok() {
                 // Rescan library to update image_path
                 let rom_dir2 = state.inner.rom_dir.read().await.clone();
-                let library = scan_rom_directory(&rom_dir2);
+                let library = scan_rom_directory(&rom_dir2, &state.inner.data_dir);
                 *state.inner.library.write().await = library;
                 let variant_label = if matched != variants[0] { format!(" (as \"{}\")", matched) } else { String::new() };
                 Json(serde_json::json!({"ok":true,"status":"downloaded","message":format!("Downloaded{}",variant_label),"image_path":format!("/api/images/{}/{}",&system,&stem)}))
@@ -1690,7 +1942,7 @@ async fn scrape_art_single(
                         let save_path = image_dir.join(format!("{}.png", &stem));
                         if fs::write(&save_path, &bytes).await.is_ok() {
                             let rom_dir2 = state.inner.rom_dir.read().await.clone();
-                            let library = scan_rom_directory(&rom_dir2);
+                            let library = scan_rom_directory(&rom_dir2, &state.inner.data_dir);
                             *state.inner.library.write().await = library;
                             Json(serde_json::json!({"ok":true,"status":"downloaded","message":"Downloaded (DuckDuckGo)","image_path":format!("/api/images/{}/{}",&system,&stem)}))
                         } else {
@@ -1858,9 +2110,811 @@ async fn search_media(
     }))
 }
 
+// ── Image search / Custom art editor endpoints ──────────────────────────────
+
+#[derive(Deserialize)]
+struct ImageSearchQuery {
+    q: String,
+}
+
+/// Free-form image search via DuckDuckGo. Returns up to 20 image URLs.
+async fn search_images(Query(q): Query<ImageSearchQuery>) -> Json<serde_json::Value> {
+    let query = q.q.trim();
+    if query.is_empty() {
+        return Json(serde_json::json!({"ok": false, "image_urls": [], "search_query": "", "error": "empty query"}));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let mut image_urls: Vec<serde_json::Value> = Vec::new();
+    let ddg_url = format!("https://duckduckgo.com/?q={}&iax=images&ia=images", urlenc(query));
+
+    if let Ok(resp) = client
+        .get(&format!("https://duckduckgo.com/?q={}", urlenc(query)))
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send().await
+    {
+        if let Ok(body) = resp.text().await {
+            if let Some(vqd) = extract_vqd(&body) {
+                let api_url = format!(
+                    "https://duckduckgo.com/i.js?l=us-en&o=json&q={}&vqd={}&f=,,,,,&p=1",
+                    urlenc(query), urlenc(&vqd)
+                );
+                if let Ok(api_resp) = client.get(&api_url)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .header("Referer", "https://duckduckgo.com/")
+                    .send().await
+                {
+                    if let Ok(json) = api_resp.json::<serde_json::Value>().await {
+                        if let Some(results) = json["results"].as_array() {
+                            for r in results.iter().take(20) {
+                                let img = r["image"].as_str().unwrap_or("");
+                                if !img.starts_with("http") { continue; }
+                                let thumb = r["thumbnail"].as_str().unwrap_or(img);
+                                let title = r["title"].as_str().unwrap_or("");
+                                let source = r["source"].as_str().unwrap_or("");
+                                image_urls.push(serde_json::json!({
+                                    "image": img,
+                                    "thumbnail": thumb,
+                                    "title": title,
+                                    "source": source,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "image_urls": image_urls,
+        "search_query": query,
+        "ddg_images_url": ddg_url,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ApplyArtBody {
+    url: String,
+}
+
+/// Sniff image MIME from the first bytes. Returns ("png" | "jpg" | "webp" | "gif") or "png" fallback.
+fn detect_image_ext(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" { return "png"; }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF { return "jpg"; }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { return "webp"; }
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") { return "gif"; }
+    "png"
+}
+
+/// Remove any pre-existing image variants for a given stem in a directory.
+fn remove_existing_images(dir: &std::path::Path, stem: &str) {
+    for ext in &["png", "jpg", "jpeg", "webp", "gif"] {
+        let p = dir.join(format!("{}.{}", stem, ext));
+        if p.exists() { let _ = std::fs::remove_file(&p); }
+    }
+}
+
+/// Upload raw image bytes for a single game's art.
+/// POST /api/upload-art/{system}?file=X    body: raw image bytes
+async fn upload_art(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+    Query(query): Query<SingleGameQuery>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    if body.len() < 32 {
+        return Json(serde_json::json!({"ok": false, "message": "Empty or invalid image"}));
+    }
+    if body.len() > 20 * 1024 * 1024 {
+        return Json(serde_json::json!({"ok": false, "message": "Image too large (max 20 MB)"}));
+    }
+
+    let stem = std::path::Path::new(&query.file)
+        .file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let image_dir = rom_dir.join(&system).join("images");
+    let _ = std::fs::create_dir_all(&image_dir);
+
+    let ext = detect_image_ext(&body);
+    remove_existing_images(&image_dir, &stem);
+    let save_path = image_dir.join(format!("{}.{}", &stem, ext));
+    if let Err(e) = fs::write(&save_path, &body).await {
+        return Json(serde_json::json!({"ok": false, "message": format!("Failed to save: {}", e)}));
+    }
+
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+    *state.inner.library.write().await = library;
+    Json(serde_json::json!({
+        "ok": true, "status": "uploaded", "message": "Art uploaded",
+        "image_path": format!("/api/images/{}/{}", &system, &stem),
+    }))
+}
+
+/// Download an image URL and save as a single game's art.
+/// POST /api/apply-art/{system}?file=X    body: { url }
+async fn apply_art_url(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+    Query(query): Query<SingleGameQuery>,
+    Json(body): Json<ApplyArtBody>,
+) -> Json<serde_json::Value> {
+    let url = body.url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Json(serde_json::json!({"ok": false, "message": "Invalid URL"}));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let bytes = match client.get(url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header("Referer", "https://duckduckgo.com/")
+        .send().await
+    {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Json(serde_json::json!({"ok": false, "message": format!("Read failed: {}", e)})),
+        },
+        Ok(r) => return Json(serde_json::json!({"ok": false, "message": format!("HTTP {}", r.status())})),
+        Err(e) => return Json(serde_json::json!({"ok": false, "message": format!("Download failed: {}", e)})),
+    };
+
+    if bytes.len() < 32 {
+        return Json(serde_json::json!({"ok": false, "message": "Downloaded image too small"}));
+    }
+
+    let stem = std::path::Path::new(&query.file)
+        .file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let image_dir = rom_dir.join(&system).join("images");
+    let _ = std::fs::create_dir_all(&image_dir);
+
+    let ext = detect_image_ext(&bytes);
+    remove_existing_images(&image_dir, &stem);
+    let save_path = image_dir.join(format!("{}.{}", &stem, ext));
+    if let Err(e) = fs::write(&save_path, &bytes).await {
+        return Json(serde_json::json!({"ok": false, "message": format!("Save failed: {}", e)}));
+    }
+
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+    *state.inner.library.write().await = library;
+    Json(serde_json::json!({
+        "ok": true, "status": "applied", "message": "Art applied from URL",
+        "image_path": format!("/api/images/{}/{}", &system, &stem),
+    }))
+}
+
+/// Serve the system art override file.
+/// GET /api/system-art/{system}
+async fn serve_system_art(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+) -> impl IntoResponse {
+    let dir = system_art_dir(&state.inner.data_dir);
+    let png = dir.join(format!("{}.png", system));
+    let jpg = dir.join(format!("{}.jpg", system));
+    let (file_path, ct) = if png.exists() { (png, "image/png") }
+        else if jpg.exists() { (jpg, "image/jpeg") }
+        else { return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain".to_string())], Vec::new()); };
+    match fs::read(&file_path).await {
+        Ok(bytes) => (StatusCode::OK, [(header::CONTENT_TYPE, ct.to_string())], bytes),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain".to_string())], Vec::new()),
+    }
+}
+
+/// Upload raw image bytes as a system's cover art override.
+/// POST /api/upload-system-art/{system}    body: raw image bytes
+async fn upload_system_art(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    if body.len() < 32 {
+        return Json(serde_json::json!({"ok": false, "message": "Empty or invalid image"}));
+    }
+    if body.len() > 20 * 1024 * 1024 {
+        return Json(serde_json::json!({"ok": false, "message": "Image too large (max 20 MB)"}));
+    }
+
+    let dir = system_art_dir(&state.inner.data_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    // Remove old variants
+    for ext in &["png", "jpg", "jpeg", "webp", "gif"] {
+        let p = dir.join(format!("{}.{}", system, ext));
+        if p.exists() { let _ = std::fs::remove_file(&p); }
+    }
+    let ext = detect_image_ext(&body);
+    let save_path = dir.join(format!("{}.{}", system, ext));
+    if let Err(e) = fs::write(&save_path, &body).await {
+        return Json(serde_json::json!({"ok": false, "message": format!("Failed to save: {}", e)}));
+    }
+    // Rescan so SystemInfo.cover_image picks up the override
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+    *state.inner.library.write().await = library;
+
+    Json(serde_json::json!({
+        "ok": true, "status": "uploaded", "message": "System art uploaded",
+        "cover_image": format!("/api/system-art/{}", system),
+    }))
+}
+
+/// Apply an image URL as a system's cover art override.
+/// POST /api/apply-system-art/{system}    body: { url }
+async fn apply_system_art_url(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+    Json(body): Json<ApplyArtBody>,
+) -> Json<serde_json::Value> {
+    let url = body.url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Json(serde_json::json!({"ok": false, "message": "Invalid URL"}));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let bytes = match client.get(url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header("Referer", "https://duckduckgo.com/")
+        .send().await
+    {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Json(serde_json::json!({"ok": false, "message": format!("Read failed: {}", e)})),
+        },
+        Ok(r) => return Json(serde_json::json!({"ok": false, "message": format!("HTTP {}", r.status())})),
+        Err(e) => return Json(serde_json::json!({"ok": false, "message": format!("Download failed: {}", e)})),
+    };
+    if bytes.len() < 32 {
+        return Json(serde_json::json!({"ok": false, "message": "Downloaded image too small"}));
+    }
+
+    let dir = system_art_dir(&state.inner.data_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    for ext in &["png", "jpg", "jpeg", "webp", "gif"] {
+        let p = dir.join(format!("{}.{}", system, ext));
+        if p.exists() { let _ = std::fs::remove_file(&p); }
+    }
+    let ext = detect_image_ext(&bytes);
+    let save_path = dir.join(format!("{}.{}", system, ext));
+    if let Err(e) = fs::write(&save_path, &bytes).await {
+        return Json(serde_json::json!({"ok": false, "message": format!("Save failed: {}", e)}));
+    }
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+    *state.inner.library.write().await = library;
+
+    Json(serde_json::json!({
+        "ok": true, "status": "applied", "message": "System art applied from URL",
+        "cover_image": format!("/api/system-art/{}", system),
+    }))
+}
+
+/// Remove the system art override (revert to game-picked cover).
+/// DELETE /api/system-art/{system}
+async fn delete_system_art(
+    State(state): State<AppState>,
+    Path(system): Path<String>,
+) -> Json<serde_json::Value> {
+    let dir = system_art_dir(&state.inner.data_dir);
+    let mut removed = false;
+    for ext in &["png", "jpg", "jpeg", "webp", "gif"] {
+        let p = dir.join(format!("{}.{}", system, ext));
+        if p.exists() { let _ = std::fs::remove_file(&p); removed = true; }
+    }
+    if removed {
+        let rom_dir = state.inner.rom_dir.read().await.clone();
+        let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+        *state.inner.library.write().await = library;
+    }
+    Json(serde_json::json!({"ok": true, "removed": removed}))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async fn health() -> &'static str { "OK" }
+
+// ── SteamGridDB scraper (hero banner + transparent logo) ─────────────────
+
+fn banner_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("banners")
+}
+
+fn logo_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("logos")
+}
+
+fn art_filename(system: &str, file: &str) -> String {
+    let stem = std::path::Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or(file);
+    format!("{}_{}.png", system, sanitize_filename(stem))
+}
+
+async fn serve_banner(State(state): State<AppState>, Path((system, file)): Path<(String, String)>) -> impl IntoResponse {
+    let path = banner_dir(&state.inner.data_dir).join(art_filename(&system, &file));
+    if path.exists() {
+        if let Ok(data) = fs::read(&path).await {
+            return ([(header::CONTENT_TYPE, "image/png")], data).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn serve_logo(State(state): State<AppState>, Path((system, file)): Path<(String, String)>) -> impl IntoResponse {
+    let path = logo_dir(&state.inner.data_dir).join(art_filename(&system, &file));
+    if path.exists() {
+        if let Ok(data) = fs::read(&path).await {
+            return ([(header::CONTENT_TYPE, "image/png")], data).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn scrape_banner(
+    State(state): State<AppState>,
+    Path((system, file)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    scrape_steamgrid(&state, &system, &file, "heroes").await
+}
+
+async fn scrape_logo(
+    State(state): State<AppState>,
+    Path((system, file)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    scrape_steamgrid(&state, &system, &file, "logos").await
+}
+
+async fn scrape_steamgrid(state: &AppState, system: &str, file: &str, kind: &str) -> Json<serde_json::Value> {
+    let settings = state.inner.settings.read().await.clone();
+    let key = match settings.steamgriddb_api_key.as_deref() {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => return Json(serde_json::json!({"ok": false, "error": "SteamGridDB API key not configured"})),
+    };
+    let game_stem = std::path::Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or(file).to_string();
+    let query = bare_game_name(&game_stem);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("retroweb")
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Json(serde_json::json!({"ok": false, "error": "client build failed"})),
+    };
+
+    // 1) Search game by name
+    let search_url = format!("https://www.steamgriddb.com/api/v2/search/autocomplete/{}", urlenc(&query));
+    let auth = format!("Bearer {}", key);
+    let search_resp = client.get(&search_url).header("Authorization", &auth).send().await;
+    let games_json: serde_json::Value = match search_resp {
+        Ok(r) if r.status().is_success() => match r.json().await { Ok(j) => j, Err(_) => return Json(serde_json::json!({"ok": false, "error": "json parse"})) },
+        _ => return Json(serde_json::json!({"ok": false, "error": "search failed"})),
+    };
+    let game_id = games_json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|g| g.get("id"))
+        .and_then(|v| v.as_i64());
+    let game_id = match game_id {
+        Some(id) => id,
+        None => return Json(serde_json::json!({"ok": false, "error": "game not found in SteamGridDB"})),
+    };
+
+    // 2) Fetch heroes or logos for that game
+    let assets_url = format!("https://www.steamgriddb.com/api/v2/{}/game/{}", kind, game_id);
+    let assets_resp = client.get(&assets_url).header("Authorization", &auth).send().await;
+    let assets_json: serde_json::Value = match assets_resp {
+        Ok(r) if r.status().is_success() => match r.json().await { Ok(j) => j, Err(_) => return Json(serde_json::json!({"ok": false, "error": "assets json parse"})) },
+        _ => return Json(serde_json::json!({"ok": false, "error": "assets fetch failed"})),
+    };
+    let url = assets_json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|g| g.get("url"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let url = match url {
+        Some(u) => u,
+        None => return Json(serde_json::json!({"ok": false, "error": "no assets for this game"})),
+    };
+
+    // 3) Download to local cache
+    let dir = if kind == "heroes" { banner_dir(&state.inner.data_dir) } else { logo_dir(&state.inner.data_dir) };
+    if fs::create_dir_all(&dir).await.is_err() {
+        return Json(serde_json::json!({"ok": false, "error": "create dir failed"}));
+    }
+    let bytes = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => match r.bytes().await { Ok(b) => b, Err(_) => return Json(serde_json::json!({"ok": false, "error": "download bytes"})) },
+        _ => return Json(serde_json::json!({"ok": false, "error": "download failed"})),
+    };
+    let path = dir.join(art_filename(system, file));
+    if fs::write(&path, &bytes).await.is_err() {
+        return Json(serde_json::json!({"ok": false, "error": "write failed"}));
+    }
+    let serve_path = if kind == "heroes" {
+        format!("/api/banner/{}/{}", system, file)
+    } else {
+        format!("/api/logo/{}/{}", system, file)
+    };
+    Json(serde_json::json!({"ok": true, "url": serve_path}))
+}
+
+// ── Playtime handlers ────────────────────────────────────────────────────
+
+async fn get_all_playtime(State(state): State<AppState>) -> Json<Vec<PlaytimeStats>> {
+    let playtime = state.inner.playtime.read().await;
+    let mut list: Vec<PlaytimeStats> = playtime.values().cloned().collect();
+    list.sort_by(|a, b| b.last_played_at.cmp(&a.last_played_at));
+    Json(list)
+}
+
+async fn get_recent_playtime(State(state): State<AppState>) -> Json<Vec<PlaytimeStats>> {
+    let playtime = state.inner.playtime.read().await;
+    let mut list: Vec<PlaytimeStats> = playtime
+        .values()
+        .filter(|s| s.last_played_at > 0)
+        .cloned()
+        .collect();
+    list.sort_by(|a, b| b.last_played_at.cmp(&a.last_played_at));
+    list.truncate(50);
+    Json(list)
+}
+
+async fn get_last_played(State(state): State<AppState>) -> Json<Option<PlaytimeStats>> {
+    let playtime = state.inner.playtime.read().await;
+    let last = playtime
+        .values()
+        .filter(|s| s.last_played_at > 0)
+        .max_by_key(|s| s.last_played_at)
+        .cloned();
+    Json(last)
+}
+
+async fn get_playtime(State(state): State<AppState>, Path(game_id): Path<String>) -> Json<Option<PlaytimeStats>> {
+    let playtime = state.inner.playtime.read().await;
+    Json(playtime.get(&game_id).cloned())
+}
+
+async fn playtime_start(State(state): State<AppState>, Json(body): Json<PlaytimeStartBody>) -> Json<PlaytimeStats> {
+    let mut playtime = state.inner.playtime.write().await;
+    let entry = playtime.entry(body.game_id.clone()).or_insert_with(|| PlaytimeStats {
+        game_id: body.game_id.clone(),
+        system: body.system.clone(),
+        file: body.file.clone(),
+        name: body.name.clone(),
+        total_seconds: 0,
+        last_played_at: 0,
+        play_count: 0,
+    });
+    entry.system = body.system;
+    entry.file = body.file;
+    entry.name = body.name;
+    entry.last_played_at = now_unix();
+    entry.play_count += 1;
+    let snap = entry.clone();
+    save_playtime(&state.inner.data_dir, &playtime);
+    Json(snap)
+}
+
+async fn playtime_end(State(state): State<AppState>, Json(body): Json<PlaytimeEndBody>) -> Json<serde_json::Value> {
+    let mut playtime = state.inner.playtime.write().await;
+    let total = if let Some(entry) = playtime.get_mut(&body.game_id) {
+        entry.total_seconds += body.duration_seconds;
+        entry.last_played_at = now_unix();
+        Some(entry.total_seconds)
+    } else {
+        None
+    };
+    match total {
+        Some(t) => {
+            save_playtime(&state.inner.data_dir, &playtime);
+            Json(serde_json::json!({"ok": true, "total_seconds": t}))
+        }
+        None => Json(serde_json::json!({"ok": false, "error": "game not started"})),
+    }
+}
+
+// ── Collections handlers ────────────────────────────────────────────────
+
+async fn list_collections(State(state): State<AppState>) -> Json<Vec<Collection>> {
+    Json(state.inner.collections.read().await.clone())
+}
+
+async fn create_collection(State(state): State<AppState>, Json(body): Json<CollectionCreateBody>) -> Json<Collection> {
+    let mut collections = state.inner.collections.write().await;
+    let id = format!("col-{}", now_unix());
+    let collection = Collection {
+        id: id.clone(),
+        name: body.name,
+        icon: body.icon,
+        game_ids: Vec::new(),
+        created_at: now_unix(),
+    };
+    collections.push(collection.clone());
+    save_collections(&state.inner.data_dir, &collections);
+    Json(collection)
+}
+
+async fn update_collection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CollectionUpdateBody>,
+) -> Json<serde_json::Value> {
+    let mut collections = state.inner.collections.write().await;
+    if let Some(col) = collections.iter_mut().find(|c| c.id == id) {
+        if let Some(n) = body.name { col.name = n; }
+        if let Some(icon) = body.icon { col.icon = Some(icon); }
+        if let Some(ids) = body.game_ids { col.game_ids = ids; }
+        save_collections(&state.inner.data_dir, &collections);
+        return Json(serde_json::json!({"ok": true}));
+    }
+    Json(serde_json::json!({"ok": false, "error": "not found"}))
+}
+
+async fn delete_collection(State(state): State<AppState>, Path(id): Path<String>) -> Json<serde_json::Value> {
+    let mut collections = state.inner.collections.write().await;
+    let before = collections.len();
+    collections.retain(|c| c.id != id);
+    if collections.len() != before {
+        save_collections(&state.inner.data_dir, &collections);
+        return Json(serde_json::json!({"ok": true}));
+    }
+    Json(serde_json::json!({"ok": false}))
+}
+
+async fn collection_add_game(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CollectionGameBody>,
+) -> Json<serde_json::Value> {
+    let mut collections = state.inner.collections.write().await;
+    if let Some(col) = collections.iter_mut().find(|c| c.id == id) {
+        if !col.game_ids.contains(&body.game_id) {
+            col.game_ids.push(body.game_id);
+            save_collections(&state.inner.data_dir, &collections);
+        }
+        return Json(serde_json::json!({"ok": true}));
+    }
+    Json(serde_json::json!({"ok": false}))
+}
+
+async fn collection_remove_game(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CollectionGameBody>,
+) -> Json<serde_json::Value> {
+    let mut collections = state.inner.collections.write().await;
+    if let Some(col) = collections.iter_mut().find(|c| c.id == id) {
+        col.game_ids.retain(|g| g != &body.game_id);
+        save_collections(&state.inner.data_dir, &collections);
+        return Json(serde_json::json!({"ok": true}));
+    }
+    Json(serde_json::json!({"ok": false}))
+}
+
+// ── Game Launch Config handlers ────────────────────────────────────────
+
+async fn get_game_config(
+    State(state): State<AppState>,
+    Path((system, file)): Path<(String, String)>,
+) -> Json<GameLaunchConfig> {
+    let configs = state.inner.game_configs.read().await;
+    let key = format!("{}:{}", system, file);
+    Json(configs.get(&key).cloned().unwrap_or_default())
+}
+
+async fn set_game_config(
+    State(state): State<AppState>,
+    Path((system, file)): Path<(String, String)>,
+    Json(cfg): Json<GameLaunchConfig>,
+) -> Json<serde_json::Value> {
+    let mut configs = state.inner.game_configs.write().await;
+    let key = format!("{}:{}", system, file);
+    if cfg.core.is_none() && cfg.shader.is_none() && cfg.options.is_none() {
+        configs.remove(&key);
+    } else {
+        configs.insert(key, cfg);
+    }
+    save_game_configs(&state.inner.data_dir, &configs);
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn list_alternate_cores(Path(system): Path<String>) -> Json<Vec<&'static str>> {
+    Json(alternate_cores(&system))
+}
+
+// ── Hidden games handlers ────────────────────────────────────────────
+
+async fn list_hidden_games(State(state): State<AppState>) -> Json<Vec<String>> {
+    let hidden = state.inner.hidden_games.read().await;
+    Json(hidden.iter().cloned().collect())
+}
+
+async fn set_hidden_games(
+    State(state): State<AppState>,
+    Json(ids): Json<Vec<String>>,
+) -> Json<serde_json::Value> {
+    let mut hidden = state.inner.hidden_games.write().await;
+    *hidden = ids.into_iter().collect();
+    save_hidden_games(&state.inner.data_dir, &hidden);
+    Json(serde_json::json!({"ok": true}))
+}
+
+// ── Duplicates ────────────────────────────────────────────────────────
+
+async fn scan_duplicates(State(state): State<AppState>) -> Json<Vec<DuplicateGroup>> {
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let lib = state.inner.library.read().await.clone();
+
+    let mut by_size: HashMap<u64, Vec<(GameInfo, PathBuf)>> = HashMap::new();
+    for (_, games) in lib.games.iter() {
+        for g in games {
+            let path = rom_dir.join(&g.system).join(&g.file);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let sz = meta.len();
+                if sz > 0 {
+                    by_size.entry(sz).or_default().push((g.clone(), path));
+                }
+            }
+        }
+    }
+
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    for (sz, candidates) in by_size {
+        if candidates.len() < 2 { continue; }
+        let mut by_hash: HashMap<String, Vec<GameInfo>> = HashMap::new();
+        for (g, p) in candidates {
+            if let Some(h) = hash_file_head(&p) {
+                by_hash.entry(h).or_default().push(g);
+            }
+        }
+        for (h, games) in by_hash {
+            if games.len() >= 2 {
+                groups.push(DuplicateGroup { hash: h, size: sz, games });
+            }
+        }
+    }
+    groups.sort_by(|a, b| b.games.len().cmp(&a.games.len()));
+
+    *state.inner.duplicates.write().await = groups.clone();
+    Json(groups)
+}
+
+fn hash_file_head(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = f.read(&mut buf).ok()?;
+    // FNV-1a 64-bit hash on first 64KB — fast and stable for dupe detection
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in &buf[..n] {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(format!("{:016x}", hash))
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────
+
+async fn get_logs(State(state): State<AppState>) -> Json<Vec<LogEntry>> {
+    let buf = state.inner.log_buffer.read().await;
+    Json(buf.iter().cloned().collect())
+}
+
+async fn clear_logs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.inner.log_buffer.write().await.clear();
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn push_log(state: &AppState, level: &str, msg: &str) {
+    let entry = LogEntry { timestamp: now_unix(), level: level.to_string(), message: msg.to_string() };
+    let mut buf = state.inner.log_buffer.write().await;
+    buf.push_back(entry);
+    while buf.len() > 500 { buf.pop_front(); }
+}
+
+// ── Version / Update check ───────────────────────────────────────────
+
+#[derive(Serialize)]
+struct VersionInfo {
+    current: &'static str,
+    latest: Option<String>,
+    update_available: bool,
+}
+
+async fn get_version() -> Json<VersionInfo> {
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = check_latest_version().await;
+    let update_available = match &latest {
+        Some(l) => l.trim_start_matches('v') != current,
+        None => false,
+    };
+    Json(VersionInfo { current, latest, update_available })
+}
+
+async fn check_latest_version() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .user_agent("retroweb")
+        .build()
+        .ok()?;
+    let res = client
+        .get("https://api.github.com/repos/anthropics/retroweb/releases/latest")
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() { return None; }
+    let json: serde_json::Value = res.json().await.ok()?;
+    json.get("tag_name").and_then(|v| v.as_str()).map(String::from)
+}
+
+// ── Config export/import ─────────────────────────────────────────────
+
+async fn export_config(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let settings = state.inner.settings.read().await.clone();
+    let playtime = state.inner.playtime.read().await.clone();
+    let collections = state.inner.collections.read().await.clone();
+    let game_configs = state.inner.game_configs.read().await.clone();
+    let hidden = state.inner.hidden_games.read().await.iter().cloned().collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "exported_at": now_unix(),
+        "settings": settings,
+        "playtime": playtime,
+        "collections": collections,
+        "game_configs": game_configs,
+        "hidden_games": hidden,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    settings: Option<AppSettings>,
+    playtime: Option<HashMap<String, PlaytimeStats>>,
+    collections: Option<Vec<Collection>>,
+    game_configs: Option<HashMap<String, GameLaunchConfig>>,
+    hidden_games: Option<Vec<String>>,
+}
+
+async fn import_config(
+    State(state): State<AppState>,
+    Json(body): Json<ImportBody>,
+) -> Json<serde_json::Value> {
+    if let Some(s) = body.settings {
+        *state.inner.settings.write().await = s.clone();
+        save_settings(&state.inner.data_dir, &s);
+    }
+    if let Some(p) = body.playtime {
+        *state.inner.playtime.write().await = p.clone();
+        save_playtime(&state.inner.data_dir, &p);
+    }
+    if let Some(c) = body.collections {
+        *state.inner.collections.write().await = c.clone();
+        save_collections(&state.inner.data_dir, &c);
+    }
+    if let Some(g) = body.game_configs {
+        *state.inner.game_configs.write().await = g.clone();
+        save_game_configs(&state.inner.data_dir, &g);
+    }
+    if let Some(h) = body.hidden_games {
+        let set: HashSet<String> = h.into_iter().collect();
+        *state.inner.hidden_games.write().await = set.clone();
+        save_hidden_games(&state.inner.data_dir, &set);
+    }
+    Json(serde_json::json!({"ok": true}))
+}
 
 fn parse_range(range: &str, file_size: u64) -> Option<(u64, u64)> {
     let range = range.strip_prefix("bytes=")?;
@@ -1917,9 +2971,14 @@ async fn main() {
     }
 
     info!("Scanning ROM directory: {}", effective_rom_dir);
-    let library = scan_rom_directory(&rom_path);
+    let library = scan_rom_directory(&rom_path, &data_dir);
     info!("Found {} systems", library.systems.len());
     info!("Data directory: {}", data_dir.display());
+
+    let playtime = load_playtime(&data_dir);
+    let collections = load_collections(&data_dir);
+    let game_configs = load_game_configs(&data_dir);
+    let hidden_games = load_hidden_games(&data_dir);
 
     let state = AppState {
         inner: Arc::new(AppInner {
@@ -1927,6 +2986,12 @@ async fn main() {
             library: RwLock::new(library),
             data_dir,
             settings: RwLock::new(settings),
+            playtime: RwLock::new(playtime),
+            collections: RwLock::new(collections),
+            game_configs: RwLock::new(game_configs),
+            hidden_games: RwLock::new(hidden_games),
+            duplicates: RwLock::new(Vec::new()),
+            log_buffer: RwLock::new(std::collections::VecDeque::with_capacity(500)),
         }),
     };
 
@@ -1966,6 +3031,43 @@ async fn main() {
         .route("/api/scrape-art-single/{system}", get(scrape_art_single))
         .route("/api/scrape-info-single/{system}", get(scrape_info_single))
         .route("/api/search-media/{system}", get(search_media))
+        // Custom art editor (manual upload + URL apply + image search)
+        .route("/api/search-images", get(search_images))
+        .route("/api/upload-art/{system}", post(upload_art))
+        .route("/api/apply-art/{system}", post(apply_art_url))
+        .route("/api/system-art/{system}", get(serve_system_art).delete(delete_system_art))
+        .route("/api/upload-system-art/{system}", post(upload_system_art))
+        .route("/api/apply-system-art/{system}", post(apply_system_art_url))
+        // Playtime
+        .route("/api/playtime", get(get_all_playtime))
+        .route("/api/playtime/recent", get(get_recent_playtime))
+        .route("/api/playtime/last", get(get_last_played))
+        .route("/api/playtime/{game_id}", get(get_playtime))
+        .route("/api/playtime/start", post(playtime_start))
+        .route("/api/playtime/end", post(playtime_end))
+        // Collections
+        .route("/api/collections", get(list_collections).post(create_collection))
+        .route("/api/collections/{id}", post(update_collection).delete(delete_collection))
+        .route("/api/collections/{id}/add", post(collection_add_game))
+        .route("/api/collections/{id}/remove", post(collection_remove_game))
+        // Game launch config + alternate cores
+        .route("/api/game-config/{system}/{file}", get(get_game_config).post(set_game_config))
+        .route("/api/alternate-cores/{system}", get(list_alternate_cores))
+        // Hidden games
+        .route("/api/hidden-games", get(list_hidden_games).post(set_hidden_games))
+        // Duplicate detection
+        .route("/api/duplicates/scan", post(scan_duplicates))
+        // Logs + version
+        .route("/api/logs", get(get_logs).delete(clear_logs))
+        .route("/api/version", get(get_version))
+        // Config export/import
+        .route("/api/config/export", get(export_config))
+        .route("/api/config/import", post(import_config))
+        // SteamGridDB hero banner + logo
+        .route("/api/banner/{system}/{file}", get(serve_banner))
+        .route("/api/logo/{system}/{file}", get(serve_logo))
+        .route("/api/scrape-banner/{system}/{file}", post(scrape_banner))
+        .route("/api/scrape-logo/{system}/{file}", post(scrape_logo))
         .fallback_service(ServeDir::new(&frontend_dir))
         .layer(cors)
         .with_state(state);

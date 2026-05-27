@@ -1,6 +1,6 @@
 # RetroWeb - Project Document
 
-> Last updated: 2026-05-25
+> Last updated: 2026-05-28
 
 RetroWeb is a self-hosted retro game launcher and emulator. It runs as a local web server (Rust/Axum backend + TypeScript/Vite frontend) and plays games in the browser via EmulatorJS.
 
@@ -13,16 +13,33 @@ RetroWeb is a self-hosted retro game launcher and emulator. It runs as a local w
 3. [ROM Management](#rom-management)
 4. [Thumbnail Scraper](#thumbnail-scraper)
 5. [Game Info Scraper](#game-info-scraper)
-6. [Controller Support](#controller-support)
-6. [Button Mapping & Profiles](#button-mapping--profiles)
-7. [Hotkey Combos](#hotkey-combos)
-8. [FullView Mode](#fullview-mode)
-9. [Themes](#themes)
-10. [Favourites & Game Browsing](#favourites--game-browsing)
-11. [Settings](#settings)
-12. [API Reference](#api-reference)
-13. [Configuration & Storage](#configuration--storage)
-14. [Build & Run](#build--run)
+6. [Hero Banner & Logo (SteamGridDB)](#hero-banner--logo-steamgriddb)
+7. [Custom Art Editor (Upload / Search / URL)](#custom-art-editor-upload--search--url)
+8. [Controller Support](#controller-support)
+8. [Button Mapping & Profiles](#button-mapping--profiles)
+9. [Hotkey Combos](#hotkey-combos)
+10. [FullView Mode](#fullview-mode)
+11. [Video Preview Autoplay](#video-preview-autoplay)
+12. [Themes](#themes)
+13. [Game Browsing](#game-browsing)
+14. [Favourites & Collections](#favourites--collections)
+15. [Recently Played & Playtime Tracking](#recently-played--playtime-tracking)
+16. [Resume Last Game](#resume-last-game)
+17. [Smart Search](#smart-search)
+18. [Virtualized Lists](#virtualized-lists)
+19. [Hidden Games](#hidden-games)
+20. [Duplicate Detection](#duplicate-detection)
+21. [Per-Game Launch Config](#per-game-launch-config)
+22. [Save State Browser](#save-state-browser)
+23. [Import / Export / Auto Backup](#import--export--auto-backup)
+24. [Cloud Save Sync (WebDAV)](#cloud-save-sync-webdav)
+25. [Plugin System](#plugin-system)
+26. [Diagnostics & Logs](#diagnostics--logs)
+27. [Update Check](#update-check)
+28. [Settings](#settings)
+29. [API Reference](#api-reference)
+30. [Configuration & Storage](#configuration--storage)
+31. [Build & Run](#build--run)
 
 ---
 
@@ -613,6 +630,10 @@ Stored in `~/.retroweb/settings.json`:
 | `retroweb-hotkey-config` | Hotkey combo configuration |
 | `retroweb-theme` | Selected theme ID (default: "midnight") |
 | `retroweb-favourites` | Array of favourite game entries (gameId + timestamp) |
+| `retroweb-savestates-{gameId}` | Save state slot metadata (slot, screenshot, timestamp) |
+| `retroweb-saves-backup-index` | Auto-backup rolling index entries |
+| `retroweb-saves-backup-{gameId}-{ts}` | Per-snapshot save state metadata |
+| `retroweb-plugins` | Installed plugin manifests (name, version, source, enabled) |
 
 ---
 
@@ -639,6 +660,40 @@ Stored in `~/.retroweb/settings.json`:
 | GET | `/api/rescan-stream` | SSE stream: rescan ROMs with progress |
 | GET | `/api/scrape-art-single/{system}?file=X` | Scrape thumbnail for a single game |
 | GET | `/api/scrape-info-single/{system}?file=X` | Scrape metadata for a single game |
+| GET | `/api/playtime` | All playtime stats sorted by recent |
+| GET | `/api/playtime/recent` | Top 50 recent (last_played > 0) |
+| GET | `/api/playtime/last` | Most recently played game stats or null |
+| GET | `/api/playtime/{game_id}` | Stats for one game |
+| POST | `/api/playtime/start` | Begin a session; body `{game_id, system, file, name}` |
+| POST | `/api/playtime/end` | End a session; body `{game_id, duration_seconds}` |
+| GET | `/api/collections` | List user collections |
+| POST | `/api/collections` | Create collection; body `{name, icon?}` |
+| POST | `/api/collections/{id}` | Update name/icon/game_ids |
+| DELETE | `/api/collections/{id}` | Delete collection |
+| POST | `/api/collections/{id}/add` | Add game to collection; body `{game_id}` |
+| POST | `/api/collections/{id}/remove` | Remove game from collection |
+| GET | `/api/game-config/{system}/{file}` | Get per-game launch override |
+| POST | `/api/game-config/{system}/{file}` | Set per-game launch override |
+| GET | `/api/alternate-cores/{system}` | List alternate cores for a system |
+| GET | `/api/hidden-games` | List hidden game IDs |
+| POST | `/api/hidden-games` | Replace hidden set; body is `string[]` |
+| POST | `/api/duplicates/scan` | Scan for content-duplicate ROMs |
+| GET | `/api/banner/{system}/{file}` | Serve cached hero banner |
+| GET | `/api/logo/{system}/{file}` | Serve cached transparent logo |
+| POST | `/api/scrape-banner/{system}/{file}` | Fetch hero banner from SteamGridDB |
+| POST | `/api/scrape-logo/{system}/{file}` | Fetch logo from SteamGridDB |
+| GET | `/api/search-images?q=Q` | DuckDuckGo image search (used by Edit Art modal) |
+| POST | `/api/upload-art/{system}?file=X` | Upload raw image bytes as a game's art |
+| POST | `/api/apply-art/{system}?file=X` | Download `{url}` and save as a game's art |
+| GET | `/api/system-art/{system}` | Serve a system's custom art override |
+| POST | `/api/upload-system-art/{system}` | Upload raw image bytes as a system art override |
+| POST | `/api/apply-system-art/{system}` | Download `{url}` and save as a system art override |
+| DELETE | `/api/system-art/{system}` | Remove the system art override |
+| GET | `/api/version` | Backend version + GitHub latest tag |
+| GET | `/api/logs` | Recent backend log entries (last 500) |
+| DELETE | `/api/logs` | Clear backend log buffer |
+| GET | `/api/config/export` | Export config snapshot as JSON |
+| POST | `/api/config/import` | Import a previously exported snapshot |
 
 ### Response Types
 
@@ -648,6 +703,7 @@ interface SystemInfo {
   name: string;        // e.g. "Nintendo Entertainment System"
   game_count: number;
   core: string;        // LibRetro core name
+  cover_image: string | null;  // e.g. "/api/images/nes/Super Mario Bros (USA)" — picked from a representative game
 }
 
 interface GameInfo {
@@ -670,6 +726,13 @@ interface AppSettings {
   scrape_metadata: boolean;
   screenscraper_user?: string;
   screenscraper_pass?: string;
+  rawg_api_key?: string;
+  steamgriddb_api_key?: string;
+  autoplay_previews?: boolean;
+  cloud_sync_url?: string;
+  cloud_sync_user?: string;
+  cloud_sync_pass?: string;
+  auto_backup_saves?: boolean;
 }
 
 interface ScrapeResult {
@@ -692,6 +755,12 @@ interface ScrapeResult {
 | `~/.retroweb/` | App data directory |
 | `~/.retroweb/settings.json` | Backend settings |
 | `~/.retroweb/metadata/{system}/` | Game metadata cache |
+| `~/.retroweb/playtime.json` | Playtime stats per game |
+| `~/.retroweb/collections.json` | User-defined collections |
+| `~/.retroweb/game-configs.json` | Per-game launch overrides |
+| `~/.retroweb/hidden-games.json` | Hidden game IDs |
+| `~/.retroweb/banners/` | Cached hero banners (SteamGridDB) |
+| `~/.retroweb/logos/` | Cached transparent logos (SteamGridDB) |
 | `{rom_dir}/bios/` | BIOS files |
 | `{rom_dir}/{system}/images/` | Box art thumbnails |
 
@@ -779,7 +848,482 @@ The home screen has three tabs:
 
 ---
 
+## Hero Banner & Logo (SteamGridDB)
+
+Steam-style hero banners and transparent PNG logos are fetched from [SteamGridDB](https://www.steamgriddb.com).
+
+### Configuration
+
+| Setting | Path | Description |
+|---|---|---|
+| API Key | Settings > ROMs > Game Info Scraper > SteamGridDB | Free account API key |
+
+### How It Works
+
+1. On the game detail page, click **🏆 Banner** or **✨ Logo** action button.
+2. Backend searches SteamGridDB by game name, picks first match, downloads the best asset.
+3. Banner cached at `~/.retroweb/banners/{system}_{stem}.png`; Logo at `~/.retroweb/logos/...`.
+4. The detail page shows banner as a full-bleed hero image with logo overlaid at bottom-left (Steam Big Picture style).
+
+Endpoints: `GET /api/banner/{system}/{file}`, `GET /api/logo/{system}/{file}`, `POST /api/scrape-banner/...`, `POST /api/scrape-logo/...`.
+
+---
+
+## Custom Art Editor (Upload / Search / URL)
+
+When auto-scraping fails (or the user just wants different art), the **Edit Art** modal lets users pick any image for a game or for a whole system. Three sources are supported: image search, local file upload, and a pasted URL.
+
+### How to open
+
+| Target | How |
+|---|---|
+| Game art | Hover a game card → click the small ✎ button (top-left), **or** right-click the card → **Edit Art**, **or** open the game's detail page → **✎ Edit Art** button / click the cover. |
+| System art | Systems tab → hover a system card → click the small ✎ button (top-right of the cover), **or** right-click the system card. |
+
+### Modal tabs
+
+| Tab | What it does |
+|---|---|
+| 🔍 **Search** | Free-form image search via DuckDuckGo. Pre-filled with a sensible query (`{game name} {system} box art` or `{system name} console logo`). Results render as a thumbnail grid — click any image to download + apply. A **Open Google** link launches the same query on Google Images for cases when DDG doesn't have what's needed. |
+| 📤 **Upload** | Click or drag/drop an image file from disk (max 20 MB). Image type is sniffed from magic bytes (PNG/JPG/WebP/GIF) and saved with the correct extension. |
+| 🔗 **URL** | Paste any image URL (right-click any web image → "Copy image address"). Server downloads it on the user's behalf, avoiding browser CORS issues. |
+| ♻ **Reset** | **System only**: removes the custom override and reverts to the auto-picked cover (chosen from a representative game's box art). |
+
+After any apply/upload, the visible cover refreshes immediately (detail view, game grid, or systems grid) — no manual reload needed.
+
+### Storage
+
+| Type | Location |
+|---|---|
+| Game art | `{rom_dir}/{system}/images/{stem}.{ext}` — same path as scraped art. Pre-existing variants (png/jpg/jpeg/webp/gif) for the same stem are removed before save so only one image remains. |
+| System art override | `~/.retroweb/system-art/{system}.{ext}` — separate from ROM dir so it never pollutes the user's ROM collection. |
+
+`pick_system_cover()` checks the override path first; if present, the system's `cover_image` field points to `/api/system-art/{system}` instead of a game's image.
+
+### Endpoints
+
+| Method | Path | Body | Description |
+|---|---|---|---|
+| GET | `/api/search-images?q={query}` | — | DuckDuckGo image search; returns up to 20 `{ image, thumbnail, title, source }` results. |
+| POST | `/api/upload-art/{system}?file=X` | raw image bytes | Save uploaded bytes as game art (≤20 MB). |
+| POST | `/api/apply-art/{system}?file=X` | `{url}` JSON | Download URL server-side and save as game art. |
+| GET | `/api/system-art/{system}` | — | Serve a system's custom art override. 404 if none set. |
+| POST | `/api/upload-system-art/{system}` | raw image bytes | Save uploaded bytes as system override. |
+| POST | `/api/apply-system-art/{system}` | `{url}` JSON | Download URL and save as system override. |
+| DELETE | `/api/system-art/{system}` | — | Remove the system override; cover reverts to the auto-picked game image. |
+
+---
+
+## Video Preview Autoplay
+
+When enabled, hovering/focusing on a game in FullView autoplays a YouTube gameplay video as the background.
+
+### Configuration
+
+| Setting | Path | Description |
+|---|---|---|
+| Autoplay previews | Settings > Appearance > FullView Preview | Toggle on/off (default: off) |
+
+### How It Works
+
+1. After 900ms of focus on a game card in FullView, RetroWeb queries the backend `/api/search-media/{system}?file=...` to find a YouTube video ID.
+2. Top result is cached in-memory per session.
+3. An invisible-controls iframe loads the embed with `?autoplay=1&mute=1&loop=1`, scaled and dimmed (40% opacity) behind the carousel.
+4. Switching games cancels in-flight preview and fades out the iframe.
+
+---
+
+## System Cards
+
+The **Systems** tab renders each detected system as a media card with its own representative cover image — picked automatically from a game in that system's library (the middle entry of the alphabetically-sorted games-with-art, so the choice is varied and stable across rescans).
+
+| Field | Source |
+|---|---|
+| Cover image | Backend `SystemInfo.cover_image` — points to `/api/images/{system}/{stem}` of a picked game |
+| Fallback | `SYSTEM_ICONS[id]` emoji over an accent-tinted gradient when no game has scraped art yet |
+| Title / ID / Game count | Overlaid in a body strip under the cover |
+
+Cards refresh automatically when ROMs are rescanned and when new art is scraped. Backend logic lives in `pick_system_cover()` in `src/main.rs`; frontend rendering in `renderSystems()` in `frontend/src/main.ts`; styling in `.system-card*` rules in `styles.css`.
+
+---
+
+## Game Browsing
+
+The home screen has 5 navigation tabs:
+
+| Tab | Description |
+|-----|-------------|
+| **Systems** | Default view — system cards (NES, SNES, etc.) |
+| **All Games** | Browse all games across all systems, with sort/filter/search |
+| **Recently Played** | Games played recently, sorted by last-played descending |
+| **Favourites** | Heart-marked games |
+| **Collections** | User-defined collections |
+
+### All Games tab controls
+
+- **Search box**: realtime fuzzy match (180ms debounce). Substring matches rank above subsequence matches; prefix matches rank highest.
+- **Sort**: Name A-Z, Name Z-A, By System, Most Played, Last Played.
+- **System filter**: dropdown to limit to one system.
+- **Show hidden toggle**: include hidden games in results.
+- **View-mode toggle**: switch between **Grid** (card thumbnails, virtualized for >200 games) and **List** (compact rows with name, system, playtime, last played, and quick-action buttons). Preference is persisted to `localStorage` (`allGamesViewMode`).
+
+---
+
+## Favourites & Collections
+
+### Favourites
+
+Heart button on every game card toggles favourite status. Storage: `localStorage` under `retroweb-favourites`.
+
+### Collections
+
+User-defined game groupings. Cross-system. Each collection has: id, name, optional emoji icon, list of game IDs, created timestamp.
+
+| Action | How |
+|---|---|
+| Create | Collections tab → enter name + icon → "+ Create" |
+| Add to collection | Right-click any game card → toggle collection |
+| Remove from collection | Right-click game → toggle, OR from Collections tab → Remove from all |
+| Rename | Collection header → Rename |
+| Delete | Collection header → Delete (confirms) |
+
+Storage: backend `~/.retroweb/collections.json`. Endpoints: `GET/POST /api/collections`, `POST /api/collections/{id}`, `DELETE /api/collections/{id}`, `POST /api/collections/{id}/add`, `POST /api/collections/{id}/remove`.
+
+---
+
+## Recently Played & Playtime Tracking
+
+Every game session is tracked: a start event records `last_played_at` and increments `play_count`; an end event adds elapsed seconds to `total_seconds`.
+
+### Tracking points
+
+| Trigger | Action |
+|---|---|
+| Game launches (Play button, FullView A, or context menu) | `POST /api/playtime/start` |
+| Player view exits (Back, hotkey exit, kiosk return) | `POST /api/playtime/end` with duration |
+
+Sessions under 3 seconds are ignored to avoid noise.
+
+### Storage
+
+Backend persists `~/.retroweb/playtime.json` — a map of `gameId → PlaytimeStats`.
+
+```json
+{
+  "nes:Super Mario Bros.nes": {
+    "game_id": "nes:Super Mario Bros.nes",
+    "system": "nes",
+    "file": "Super Mario Bros.nes",
+    "name": "Super Mario Bros",
+    "total_seconds": 4823,
+    "last_played_at": 1716800000,
+    "play_count": 12
+  }
+}
+```
+
+### UI
+
+- **Recently Played tab**: card grid sorted by `last_played_at desc`, with playtime + relative time ("3h ago"). Search box filters.
+- **Most Played / Last Played sort** options on All Games tab.
+
+Endpoints: `GET /api/playtime`, `GET /api/playtime/recent`, `GET /api/playtime/last`, `GET /api/playtime/{game_id}`, `POST /api/playtime/start`, `POST /api/playtime/end`.
+
+---
+
+## Resume Last Game
+
+If there's a last-played game, a **Continue Playing** bar appears at the top of the Systems view with cover art, system, total playtime, and a Resume button.
+
+Source: `GET /api/playtime/last`. Refreshed on app load and after each session ends.
+
+---
+
+## Smart Search
+
+Fuzzy matching algorithm (in `fuzzyScore()`):
+- **Exact substring** match: highest priority. Earlier index = higher score. Prefix match adds 500 bonus.
+- **Subsequence** match: target must contain every query character in order, not necessarily contiguous. Streak length scales the score.
+- Case-insensitive.
+
+Used in:
+1. Header search bar (cross-system or per-system).
+2. All Games tab search input.
+3. Recently Played search input.
+
+Debounce: 180ms.
+
+---
+
+## Virtualized Lists
+
+For libraries >200 games (e.g., the 4000+ All Games view), the grid switches to **virtual scrolling**:
+- Probes a dummy card in an isolated **sandbox container** (sibling to the live grid) to measure exact column count + row height + gap. The sandbox isolates measurement from any leftover spacer in the live grid, which would otherwise create a feedback loop that explodes the spacer height.
+- Renders only visible rows + 2-row buffer above and below.
+- Uses `requestAnimationFrame` to schedule renders on scroll.
+- Attaches scroll listeners to all plausible document-scroll targets (`window`, `document`, `documentElement`, `body`) because `html, body { height: 100% }` causes scrolling to land on `body` in this layout — `window.scrollY` / `documentElement.scrollTop` stay at 0 and miss the events.
+- `ResizeObserver` re-mounts **only when the container width changes** (column count update). Height changes are ignored so the spacer's height contribution doesn't trigger an infinite remount loop.
+- For ≤200 games, the standard grid is used (no overhead).
+
+Implementation: `mountVirtualGameGrid()` / `unmountVirtualGameGrid()` / `measureGridCols()` in `main.ts`.
+
+---
+
+## Hidden Games
+
+Mark individual ROMs as hidden so they don't appear in library views.
+
+| Action | How |
+|---|---|
+| Hide a game | Right-click game card → "🔕 Hide from library" |
+| Unhide | Toggle "Show hidden" on All Games tab → right-click hidden game → "👁 Unhide" |
+| List | `GET /api/hidden-games` |
+| Bulk update | `POST /api/hidden-games` with array of game IDs |
+
+Storage: `~/.retroweb/hidden-games.json` (array of game IDs).
+
+Server filters hidden games by default. Pass `?include_hidden=true` to `/api/games` to include them.
+
+---
+
+## Duplicate Detection
+
+Settings > ROMs > **Duplicate Detection** scans all ROMs in the library and groups files with identical content hashes.
+
+### Algorithm
+
+1. Group ROMs by file size (fast, hits disk metadata only).
+2. For groups with ≥2 files, compute an FNV-1a 64-bit hash of the first 64 KB of each file.
+3. Files with matching size + hash form a duplicate group.
+4. Each group surfaces: hash, size, list of `GameInfo`.
+
+### Why first 64 KB
+
+Most ROM headers (NES, SNES, GB, etc.) live in the first few KB. Two same-sized files with matching headers are almost always the same game (different region tags / filenames). This avoids hashing multi-GB ISO files.
+
+### UI
+
+The result panel lists each group with a **Hide** button per duplicate row, which adds that ID to the hidden games set.
+
+Endpoint: `POST /api/duplicates/scan`.
+
+---
+
+## Per-Game Launch Config
+
+Override the default emulator core per game (e.g., use `mednafen_psx_hw` instead of `pcsx_rearmed` for a specific PSX title).
+
+### UI
+
+Game detail page → **Launch Config** tab → select Core dropdown → Save.
+
+### Supported alternate cores
+
+| System | Cores |
+|--------|-------|
+| nes / famicom / fds | fceumm, nestopia |
+| snes / sfc | snes9x, bsnes |
+| n64 | mupen64plus_next, parallel_n64 |
+| psx | pcsx_rearmed, mednafen_psx_hw |
+| genesis / megadrive | genesis_plus_gx, genesis_plus_gx_wide, picodrive |
+| mastersystem / gamegear | genesis_plus_gx, picodrive |
+| arcade / neogeo / cps1/2/3 / fbneo | fbneo, mame2003, mame2003_plus |
+| mame | mame2003, mame2003_plus, fbneo |
+
+### Storage
+
+Backend: `~/.retroweb/game-configs.json` — map of `"{system}:{file}"` → `{ core?, shader?, options? }`.
+
+Endpoints: `GET/POST /api/game-config/{system}/{file}`, `GET /api/alternate-cores/{system}`.
+
+---
+
+## Save State Browser
+
+The **Save States** tab on the game detail page shows all recorded slots for that game, with a screenshot, slot number, and timestamp.
+
+### How metadata is captured
+
+When the **Quick Save** hotkey (`Select + R1` by default) fires:
+1. RetroWeb calls `EJS_emulator.quickSave()` inside the iframe.
+2. Snapshots the `<canvas>` content, downscales to 320px wide, encodes as JPEG (60%).
+3. Stores in `localStorage` under `retroweb-savestates-{gameId}` as `[{ slot, screenshot, timestamp }, ...]`.
+
+### UI
+
+| Action | Behavior |
+|---|---|
+| **Load** | Sets `sessionStorage.retroweb-load-slot` then launches the game; EmulatorJS loads the slot on init |
+| **Delete** | Removes the slot from the metadata index |
+
+> Note: EmulatorJS owns the actual save state binary in its IndexedDB. RetroWeb tracks UI metadata only.
+
+---
+
+## Import / Export / Auto Backup
+
+### Export
+
+Settings > Management > **Export Config (JSON)** downloads a single JSON file containing:
+- Backend settings, playtime, collections, game configs, hidden games
+- All `retroweb-*` localStorage keys (favourites, themes, profiles, save state index, etc.)
+
+File name: `retroweb-config-YYYY-MM-DD.json`.
+
+### Import
+
+Settings > Management > **Import Config...** uploads a JSON file (same format). On success, page auto-reloads.
+
+Endpoints: `GET /api/config/export`, `POST /api/config/import`.
+
+### Auto Backup Saves
+
+Toggle in Settings > Management > **Auto-backup save states on game exit**. When enabled:
+- On each `endPlaytimeSession()`, save state metadata for the current game is copied to `localStorage` under `retroweb-saves-backup-{gameId}-{timestamp}`.
+- An index entry is added to `retroweb-saves-backup-index`.
+- Entries older than 7 days are trimmed.
+
+**Backup Now** button forces an immediate snapshot. **Show Backups** lists the index.
+
+---
+
+## Cloud Save Sync (WebDAV)
+
+Optional. Push/pull save state metadata to a WebDAV server (e.g., Nextcloud, sync.com).
+
+### Configuration
+
+Settings > Management > Cloud Save Sync (WebDAV):
+- URL: e.g., `https://webdav.example.com/retroweb/`
+- Username + Password (HTTP Basic auth)
+
+**Test Connection** sends a WebDAV `PROPFIND` request and reports OK / status code.
+
+> Note: This is a settings + test scaffold. Actual push/pull during gameplay is not yet wired (planned). The settings + test let you verify your server before sync is enabled in a future update.
+
+---
+
+## Plugin System
+
+Plugins are JavaScript ES modules that extend RetroWeb. They load on startup.
+
+### Plugin API
+
+Plugins export a default object with an `onLoad(api)` hook that receives:
+
+```typescript
+interface RetroWebPluginAPI {
+  registerScraper(name: string, fn: (game: GameInfo) => Promise<any>): void;
+  registerCommand(id: string, label: string, fn: (game: GameInfo) => void): void;
+  registerWidget(slot: string, html: string): void;
+  fetchGames(): Promise<GameInfo[]>;
+  fetchSystems(): Promise<SystemInfo[]>;
+  toast(msg: string): void;
+}
+```
+
+### Example plugin
+
+```javascript
+export default {
+  name: 'my-plugin',
+  version: '1.0.0',
+  onLoad(api) {
+    api.registerCommand('hello', 'Say Hello', (game) => {
+      api.toast(`Hello from ${game.name}!`);
+    });
+  },
+};
+```
+
+### Install
+
+Settings > Plugins > enter name + URL → **Install from URL**. The plugin source is fetched and stored in `localStorage` under `retroweb-plugins`. Reload the page to activate.
+
+### Disable / Remove
+
+Toggle the checkbox per plugin, or click Remove. Changes apply on next page load.
+
+> Plugins run in the page's JS context (no sandbox). Only install plugins you trust.
+
+---
+
+## Diagnostics & Logs
+
+Settings > Diagnostics tab shows the backend log buffer (last 500 entries in memory).
+
+| Action | Endpoint |
+|---|---|
+| Refresh | `GET /api/logs` |
+| Copy to clipboard | (client-side) |
+| Clear | `DELETE /api/logs` |
+
+Log entries: `{ timestamp, level, message }`.
+
+---
+
+## Update Check
+
+Settings > Management > Version shows current version + latest from GitHub releases.
+
+- Current version: derived from `CARGO_PKG_VERSION`.
+- Latest: `GET https://api.github.com/repos/anthropics/retroweb/releases/latest` (with 5s timeout, fails gracefully).
+
+Endpoint: `GET /api/version` → `{ current, latest, update_available }`.
+
+---
+
 ## Changelog
+
+### 2026-05-28 — Custom Art Editor
+
+- **Added**: **Edit Art** modal for games and systems with three sources — image search (DuckDuckGo, with a Google Images escape hatch), local file upload (drag/drop or picker), and pasted URL. Server-side download avoids CORS issues. See [Custom Art Editor](#custom-art-editor-upload--search--url).
+- **Added**: System art override stored at `~/.retroweb/system-art/{system}.{ext}`, surfaced as `cover_image` on `/api/systems` and served at `GET /api/system-art/{system}`. Reset button removes the override and reverts to auto-picked cover.
+- **Added**: Endpoints — `GET /api/search-images`, `POST /api/upload-art/{system}?file=X`, `POST /api/apply-art/{system}?file=X`, `GET/DELETE /api/system-art/{system}`, `POST /api/upload-system-art/{system}`, `POST /api/apply-system-art/{system}`.
+- **Added**: Game detail page now has a clickable cover and an **✎ Edit Art** button; system cards expose a hover ✎ button and a right-click shortcut.
+
+### 2026-05-27 — Per-System Cover Cards
+
+- **Added**: Each system on the Systems tab now renders as a media card with its own representative cover image (auto-picked from a game in that system's library). Falls back to an emoji + accent-tinted gradient when no scraped art is available. See [System Cards](#system-cards).
+- **Added**: `SystemInfo.cover_image` field on `/api/systems`.
+
+### 2026-05-27 — Major Feature Roll-out (Sprints 1–4)
+
+A 13-feature update aligning RetroWeb with the feature set of mainstream launchers (Playnite / LaunchBox / ES-DE).
+
+**Library & Browsing**
+- **Added**: Recently Played tab — sorted by last-played desc, with playtime and relative time.
+- **Added**: Resume Last Game bar at top of home view (cover, system, time-played, Resume button).
+- **Added**: Collections — user-defined cross-system game groupings (create/rename/delete, right-click to add).
+- **Added**: Hidden Games — right-click a card to hide; "Show hidden" toggle on All Games.
+- **Added**: Smart Search — fuzzy match (substring + subsequence with prefix bonus), 180ms debounce, available on header / All Games / Recently Played.
+- **Added**: Sort by Most Played and Last Played on All Games tab.
+- **Added**: Virtualized list rendering for libraries >200 games (IntersectionObserver-based windowing).
+
+**Metadata & Media**
+- **Added**: SteamGridDB integration — hero banners + transparent PNG logos on game detail page.
+- **Added**: Video preview autoplay in FullView (toggle in Appearance settings).
+
+**Runtime**
+- **Added**: Playtime Tracking — start/end events per session, persisted in `~/.retroweb/playtime.json`.
+- **Added**: Per-game Launch Config — override core per game (UI on game detail page, Launch Config tab).
+- **Added**: Multi-emulator support — alternate cores per system (NES: fceumm/nestopia, N64: mupen64plus_next/parallel_n64, PSX: pcsx_rearmed/mednafen_psx_hw, etc.).
+- **Added**: Save State Browser tab — slot grid with screenshot, timestamp, Load/Delete (canvas snapshot on Quick Save).
+
+**Tools**
+- **Added**: Duplicate Detection — size-grouped + FNV-1a 64KB hash, panel in Settings > ROMs.
+- **Added**: Import / Export Configuration — single JSON with backend state + localStorage.
+- **Added**: Auto Backup Saves — rolling 7-day metadata snapshots.
+- **Added**: Cloud Save Sync (WebDAV) — settings + connection test scaffold.
+- **Added**: Plugin System — JS ES module loader with `registerScraper / registerCommand / registerWidget` API.
+- **Added**: Update Check — GitHub releases latest-version probe.
+- **Added**: Logs viewer — Settings > Diagnostics tab with refresh/copy/clear.
+
+**Settings tabs added**: Management, Diagnostics, Plugins (in addition to existing Appearance / ROMs / BIOS / Hotkeys / Controller).
+
+**Backend additions**: 17 new endpoints (`/api/playtime/*`, `/api/collections/*`, `/api/game-config/*`, `/api/alternate-cores/*`, `/api/hidden-games`, `/api/duplicates/scan`, `/api/banner/*`, `/api/logo/*`, `/api/scrape-banner/*`, `/api/scrape-logo/*`, `/api/version`, `/api/logs`, `/api/config/export`, `/api/config/import`).
+
+**Storage additions** under `~/.retroweb/`: `playtime.json`, `collections.json`, `game-configs.json`, `hidden-games.json`, `banners/`, `logos/`.
 
 ### 2026-05-25 — Game Info Scraper & Game Detail Modal
 

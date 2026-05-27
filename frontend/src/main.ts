@@ -1,7 +1,18 @@
 import {
   fetchSystems, fetchGames, fetchSettings, updateSettings, rescanRoms,
   fetchBiosStatus, browseDirs, fetchMetadata, scrapeArtSingle, scrapeInfoSingle, searchMedia,
+  playtimeStart, playtimeEnd, fetchRecentPlaytime, fetchLastPlayed,
+  listCollections, createCollection, updateCollection, deleteCollection,
+  collectionAddGame, collectionRemoveGame,
+  fetchGameConfig, saveGameConfig, fetchAlternateCores,
+  fetchHiddenGames, saveHiddenGames, scanDuplicates,
+  fetchVersion, fetchLogs, clearLogs, exportConfig, importConfig,
+  bannerUrl, logoUrl, scrapeBanner, scrapeLogo,
+  searchImages, uploadArt, applyArtUrl,
+  uploadSystemArt, applySystemArtUrl, clearSystemArt,
   type SystemInfo, type GameInfo, type AppSettings, type GameMetadata, type MediaSearchResult,
+  type PlaytimeStats, type Collection, type GameLaunchConfig,
+  type DuplicateGroup, type LogEntry,
 } from './api';
 import {
   GamepadManager, type MappedGamepad, type ProfileName, type CanonicalButtonName,
@@ -68,7 +79,82 @@ function toggleFavourite(gameId: string): boolean {
 
 // All games cache
 let allGamesCache: GameInfo[] = [];
-let activeMainTab: 'systems' | 'all-games' | 'favourites' = 'systems';
+let activeMainTab: 'systems' | 'all-games' | 'favourites' | 'recent' | 'collections' = 'systems';
+
+// ── Playtime tracking ────────────────────────────────────────────────
+let currentPlaytimeSession: { gameId: string; startedAt: number } | null = null;
+let recentPlaytimeCache: PlaytimeStats[] = [];
+let lastPlayedCache: PlaytimeStats | null = null;
+
+async function refreshPlaytimeCaches(): Promise<void> {
+  try {
+    [recentPlaytimeCache, lastPlayedCache] = await Promise.all([
+      fetchRecentPlaytime(),
+      fetchLastPlayed(),
+    ]);
+  } catch { /* offline ok */ }
+}
+
+function formatPlaytime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return remMins === 0 ? `${hours}h` : `${hours}h ${remMins}m`;
+}
+
+function formatTimeAgo(timestamp: number): string {
+  if (!timestamp) return '';
+  const now = Date.now() / 1000;
+  const diff = now - timestamp;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(timestamp * 1000).toLocaleDateString();
+}
+
+async function beginPlaytimeSession(game: GameInfo): Promise<void> {
+  currentPlaytimeSession = { gameId: game.id, startedAt: Date.now() };
+  await playtimeStart(game);
+}
+
+async function endPlaytimeSession(): Promise<void> {
+  if (!currentPlaytimeSession) return;
+  const duration = Math.max(0, Math.round((Date.now() - currentPlaytimeSession.startedAt) / 1000));
+  const gameId = currentPlaytimeSession.gameId;
+  const wasActive = currentPlaytimeSession;
+  currentPlaytimeSession = null;
+  if (duration >= 3) {
+    await playtimeEnd(gameId, duration);
+    await refreshPlaytimeCaches();
+  }
+  // Auto-backup saves on exit
+  if (settings?.auto_backup_saves) {
+    currentPlaytimeSession = wasActive; // temporarily restore for rollingBackupAllSaves
+    rollingBackupAllSaves();
+    currentPlaytimeSession = null;
+  }
+  // Refresh resume bar
+  renderResumeBar();
+}
+
+// ── Collections cache ────────────────────────────────────────────────
+let collectionsCache: Collection[] = [];
+let hiddenGameIds: Set<string> = new Set();
+
+async function refreshHiddenGames(): Promise<void> {
+  try {
+    const ids = await fetchHiddenGames();
+    hiddenGameIds = new Set(ids);
+  } catch { /* ignore */ }
+}
+
+async function refreshCollections(): Promise<void> {
+  try { collectionsCache = await listCollections(); }
+  catch { /* ignore */ }
+}
 
 // Mapping editor state
 let mappingEditorGamepadIndex = -1;
@@ -353,6 +439,7 @@ const $scrapeMetadataInput = $('scrape-metadata-input') as HTMLInputElement;
 const $ssUserInput = $('ss-user-input') as HTMLInputElement;
 const $ssPassInput = $('ss-pass-input') as HTMLInputElement;
 const $rawgKeyInput = $('rawg-key-input') as HTMLInputElement;
+const $sgdbKeyInput = $('sgdb-key-input') as HTMLInputElement;
 const $saveInfoSettingsBtn = $('save-info-settings-btn');
 const $infoSettingsStatus = $('info-settings-status');
 const $scrapeInfoSystemSelect = $('scrape-info-system-select') as HTMLSelectElement;
@@ -390,6 +477,7 @@ let mappingGameProfile: GameSystemProfile = getDefaultGameProfile();
 type ViewName = 'systems' | 'games' | 'detail' | 'player' | 'settings';
 
 function showView(view: ViewName) {
+  const wasPlayer = $playerView.classList.contains('active');
   $systemsView.classList.toggle('active', view === 'systems');
   $gamesView.classList.toggle('active', view === 'games');
   $detailView.classList.toggle('active', view === 'detail');
@@ -397,6 +485,10 @@ function showView(view: ViewName) {
   $settingsView.classList.toggle('active', view === 'settings');
   if (view !== 'player') { cleanup(); stopHotkeyPolling(); }
   if (view === 'player') startHotkeyPolling();
+  // End playtime session when leaving player view
+  if (wasPlayer && view !== 'player' && currentPlaytimeSession) {
+    void endPlaytimeSession();
+  }
   if (view !== 'settings') { stopMappingVisPoll(); expandedCardIndex = -1; }
   // Hide system background when not viewing games or detail
   if (view === 'systems' || view === 'settings') showSystemBackground(null);
@@ -420,19 +512,51 @@ const SYSTEM_ICONS: Record<string, string> = {
 };
 
 function renderSystems(list: SystemInfo[]) {
-  $systemsGrid.innerHTML = list.map(sys => `
-    <div class="system-card" data-system-id="${sys.id}">
-      <div class="system-name">${SYSTEM_ICONS[sys.id] || '🎲'} ${esc(sys.name)}</div>
-      <div class="system-id">${sys.id}</div>
-      <div class="system-count">${sys.game_count} games</div>
+  $systemsGrid.innerHTML = list.map(sys => {
+    const icon = SYSTEM_ICONS[sys.id] || '🎲';
+    const hasCover = !!sys.cover_image;
+    const cover = hasCover
+      ? `<img class="system-card-img" src="${sys.cover_image}" alt="" loading="lazy" onerror="this.parentElement.classList.add('no-cover')" />`
+      : '';
+    return `
+    <div class="system-card ${hasCover ? '' : 'no-cover'}" data-system-id="${sys.id}">
+      <div class="system-card-cover">
+        ${cover}
+        <div class="system-card-fallback">${icon}</div>
+        <div class="system-card-gradient"></div>
+        <button class="system-card-edit-btn" title="Edit art" data-edit-system="${esc(sys.id)}">&#9999;&#65039;</button>
+      </div>
+      <div class="system-card-body">
+        <div class="system-name">${esc(sys.name)}</div>
+        <div class="system-card-foot">
+          <span class="system-id">${esc(sys.id)}</span>
+          <span class="system-count">${sys.game_count} games</span>
+        </div>
+      </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   $systemsGrid.querySelectorAll('.system-card').forEach(card => {
-    card.addEventListener('click', () => {
+    card.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).closest('.system-card-edit-btn')) return;
       const id = (card as HTMLElement).dataset.systemId!;
       const sys = systems.find(s => s.id === id);
       if (sys) openSystem(sys);
+    });
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const id = (card as HTMLElement).dataset.systemId!;
+      const sys = systems.find(s => s.id === id);
+      if (sys) openEditArt({ kind: 'system', system: sys });
+    });
+  });
+  $systemsGrid.querySelectorAll<HTMLButtonElement>('.system-card-edit-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.editSystem!;
+      const sys = systems.find(s => s.id === id);
+      if (sys) openEditArt({ kind: 'system', system: sys });
     });
   });
 }
@@ -465,6 +589,7 @@ function buildGameCardHTML(game: GameInfo, idx: number, showSystem = false): str
         <button class="fav-btn${fav ? ' active' : ''}" data-game-id="${esc(game.id)}" title="${fav ? 'Remove from favourites' : 'Add to favourites'}">
           ${fav ? '&#9829;' : '&#9825;'}
         </button>
+        <button class="game-card-edit-btn" data-edit-game-idx="${idx}" title="Edit art">&#9999;&#65039;</button>
       </div>
       <div class="game-info">
         <div class="game-title">${esc(game.name)}</div>
@@ -476,10 +601,25 @@ function buildGameCardHTML(game: GameInfo, idx: number, showSystem = false): str
 function attachGameCardEvents(container: HTMLElement, list: GameInfo[]) {
   container.querySelectorAll('.game-card').forEach(card => {
     card.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('.fav-btn')) return;
+      const t = e.target as HTMLElement;
+      if (t.closest('.fav-btn') || t.closest('.game-card-edit-btn')) return;
       const idx = parseInt((card as HTMLElement).dataset.gameIdx!, 10);
       const game = list[idx];
       if (game) openGameDetail(game);
+    });
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const idx = parseInt((card as HTMLElement).dataset.gameIdx!, 10);
+      const game = list[idx];
+      if (game) openGameCardMenu(game, e as MouseEvent);
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('.game-card-edit-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.editGameIdx!, 10);
+      const game = list[idx];
+      if (game) openEditArt({ kind: 'game', game });
     });
   });
   container.querySelectorAll('.fav-btn').forEach(btn => {
@@ -495,6 +635,142 @@ function attachGameCardEvents(container: HTMLElement, list: GameInfo[]) {
     });
   });
 }
+
+// ── Duplicate Detection UI ─────────────────────────────────────────
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function renderDuplicateGroupsHTML(groups: DuplicateGroup[]): string {
+  if (groups.length === 0) return '<p class="setting-hint">No duplicates found.</p>';
+  return groups.map(g => `
+    <div class="dupe-group">
+      <div class="dupe-group-header">
+        <span>Hash: <code>${esc(g.hash)}</code></span>
+        <span>${formatBytes(g.size)}</span>
+        <span>${g.games.length} copies</span>
+      </div>
+      <div class="dupe-games">
+        ${g.games.map(game => `
+          <div class="dupe-row">
+            <span class="dupe-system">${esc(game.system)}</span>
+            <span class="dupe-file" title="${esc(game.file)}">${esc(game.name)}</span>
+            <button class="action-btn sm dupe-hide-btn" data-id="${esc(game.id)}">Hide</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function wireDuplicateRemoveButtons(container: HTMLElement) {
+  container.querySelectorAll('.dupe-hide-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = (btn as HTMLElement).dataset.id!;
+      hiddenGameIds.add(id);
+      await saveHiddenGames(Array.from(hiddenGameIds));
+      (btn as HTMLButtonElement).disabled = true;
+      btn.textContent = 'Hidden';
+    });
+  });
+}
+
+// ── Game card context menu ─────────────────────────────────────────
+
+let openMenu: HTMLElement | null = null;
+
+function closeGameCardMenu() {
+  if (openMenu) { openMenu.remove(); openMenu = null; }
+}
+
+function openGameCardMenu(game: GameInfo, ev: MouseEvent) {
+  closeGameCardMenu();
+  const menu = document.createElement('div');
+  menu.className = 'game-card-menu';
+  menu.style.left = `${ev.clientX}px`;
+  menu.style.top = `${ev.clientY}px`;
+
+  const hidden = hiddenGameIds.has(game.id);
+  const inCollections = collectionsCache.filter(c => c.game_ids.includes(game.id));
+
+  let html = `<div class="menu-section">${esc(game.name)}</div>`;
+  html += `<button class="menu-item" data-action="play">&#9654; Play</button>`;
+  html += `<button class="menu-item" data-action="detail">&#9432; View Details</button>`;
+  html += `<button class="menu-item" data-action="edit-art">&#9999;&#65039; Edit Art</button>`;
+  html += `<div class="menu-divider"></div>`;
+  html += `<div class="menu-section">Collections</div>`;
+  if (collectionsCache.length === 0) {
+    html += `<button class="menu-item" data-action="no-collections" disabled style="color:var(--text-dim);">No collections yet</button>`;
+  } else {
+    collectionsCache.forEach(c => {
+      const inIt = c.game_ids.includes(game.id);
+      html += `<button class="menu-item" data-action="toggle-collection" data-col="${esc(c.id)}">
+        ${inIt ? '&#10003; ' : ''}${esc(c.icon || '📁')} ${esc(c.name)}
+      </button>`;
+    });
+  }
+  html += `<div class="menu-divider"></div>`;
+  html += `<button class="menu-item" data-action="toggle-hide">${hidden ? '&#128065; Unhide' : '&#128276; Hide from library'}</button>`;
+  if (inCollections.length > 0) {
+    html += `<button class="menu-item" data-action="remove-from-all">&#10005; Remove from all collections</button>`;
+  }
+
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+  openMenu = menu;
+
+  // Keep menu in viewport
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 8}px`;
+  if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 8}px`;
+
+  menu.querySelectorAll('.menu-item').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const action = (btn as HTMLElement).dataset.action;
+      if (action === 'play') playGame(game);
+      else if (action === 'detail') openGameDetail(game);
+      else if (action === 'edit-art') openEditArt({ kind: 'game', game });
+      else if (action === 'toggle-collection') {
+        const colId = (btn as HTMLElement).dataset.col!;
+        const col = collectionsCache.find(c => c.id === colId);
+        if (col?.game_ids.includes(game.id)) {
+          await collectionRemoveGame(colId, game.id);
+        } else {
+          await collectionAddGame(colId, game.id);
+        }
+        await refreshCollections();
+        if (activeMainTab === 'collections') renderCollectionsTab();
+      } else if (action === 'toggle-hide') {
+        if (hidden) hiddenGameIds.delete(game.id);
+        else hiddenGameIds.add(game.id);
+        await saveHiddenGames(Array.from(hiddenGameIds));
+        if (activeMainTab === 'all-games') renderAllGamesTab();
+        if (activeMainTab === 'systems' && currentSystem) {
+          currentGames = await fetchGames(currentSystem.id);
+          renderGames(currentGames);
+        }
+      } else if (action === 'remove-from-all') {
+        for (const c of inCollections) await collectionRemoveGame(c.id, game.id);
+        await refreshCollections();
+        if (activeMainTab === 'collections') renderCollectionsTab();
+      }
+      closeGameCardMenu();
+    });
+  });
+}
+
+// Close menu on outside click / escape
+document.addEventListener('click', (e) => {
+  if (openMenu && !openMenu.contains(e.target as Node)) closeGameCardMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeGameCardMenu();
+});
 
 function renderGames(list: GameInfo[]) {
   $gamesGrid.innerHTML = list.map((game, i) => buildGameCardHTML(game, i)).join('');
@@ -513,6 +789,16 @@ function sortGames(list: GameInfo[], sortBy: string): GameInfo[] {
       sorted.sort((a, b) => (favMap.get(b.id) || 0) - (favMap.get(a.id) || 0));
       break;
     }
+    case 'playtime': {
+      const ptMap = new Map(recentPlaytimeCache.map(s => [s.game_id, s.total_seconds]));
+      sorted.sort((a, b) => (ptMap.get(b.id) || 0) - (ptMap.get(a.id) || 0) || a.name.localeCompare(b.name));
+      break;
+    }
+    case 'last-played': {
+      const lpMap = new Map(recentPlaytimeCache.map(s => [s.game_id, s.last_played_at]));
+      sorted.sort((a, b) => (lpMap.get(b.id) || 0) - (lpMap.get(a.id) || 0) || a.name.localeCompare(b.name));
+      break;
+    }
   }
   return sorted;
 }
@@ -528,6 +814,230 @@ function switchMainTab(tabId: string) {
 
   if (tabId === 'all-games') renderAllGamesTab();
   if (tabId === 'favourites') renderFavouritesTab();
+  if (tabId === 'recent') renderRecentTab();
+  if (tabId === 'collections') renderCollectionsTab();
+}
+
+// ── Recently Played tab ─────────────────────────────────────────────
+
+let recentSearchQuery = '';
+
+async function renderRecentTab() {
+  const $grid = document.getElementById('recent-games-grid')!;
+  const $count = document.getElementById('recent-games-count')!;
+  const $empty = document.getElementById('recent-empty')!;
+  await refreshPlaytimeCaches();
+
+  let entries = recentPlaytimeCache;
+  if (recentSearchQuery) {
+    const q = recentSearchQuery.toLowerCase();
+    entries = entries.filter(e => e.name.toLowerCase().includes(q));
+  }
+
+  $count.textContent = `${entries.length} games`;
+  $empty.classList.toggle('hidden', entries.length > 0);
+  $grid.classList.toggle('hidden', entries.length === 0);
+
+  $grid.innerHTML = entries.map((stat, i) => {
+    const game = findGameById(stat.game_id);
+    const sysName = systems.find(s => s.id === stat.system)?.name || stat.system;
+    const img = game?.image_path
+      ? `<img src="${game.image_path}" alt="${esc(stat.name)}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'placeholder\\'>🎮</div>'" />`
+      : `<div class="placeholder">🎮</div>`;
+    return `
+      <div class="game-card recent-card" data-game-id="${esc(stat.game_id)}" data-idx="${i}">
+        <div class="game-image">${img}</div>
+        <div class="game-info">
+          <div class="game-title">${esc(stat.name)}</div>
+          <div class="game-system-tag">${esc(sysName)}</div>
+          <div class="recent-meta">
+            <span>${formatPlaytime(stat.total_seconds)}</span>
+            <span class="recent-sep">·</span>
+            <span>${formatTimeAgo(stat.last_played_at)}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  $grid.querySelectorAll('.recent-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const gameId = (card as HTMLElement).dataset.gameId!;
+      const game = findGameById(gameId);
+      if (game) openGameDetail(game);
+    });
+  });
+}
+
+function findGameById(gameId: string): GameInfo | null {
+  const found = allGamesCache.find(g => g.id === gameId);
+  if (found) return found;
+  // Fallback: derive a minimal GameInfo
+  const [system, file] = gameId.split(':');
+  if (!system || !file) return null;
+  return { id: gameId, name: file.replace(/\.[^.]+$/, ''), file, system, has_image: false, image_path: null };
+}
+
+// ── Collections tab ────────────────────────────────────────────────
+
+async function renderCollectionsTab() {
+  const $list = document.getElementById('collections-list')!;
+  const $empty = document.getElementById('collections-empty')!;
+  const $count = document.getElementById('collections-count')!;
+  await refreshCollections();
+
+  $count.textContent = `${collectionsCache.length} collections`;
+  $empty.classList.toggle('hidden', collectionsCache.length > 0);
+
+  $list.innerHTML = collectionsCache.map(col => `
+    <div class="collection-section" data-collection-id="${esc(col.id)}">
+      <div class="collection-header">
+        <span class="collection-icon">${esc(col.icon || '📁')}</span>
+        <span class="collection-name">${esc(col.name)}</span>
+        <span class="collection-count">${col.game_ids.length} games</span>
+        <button class="action-btn sm collection-rename-btn" data-id="${esc(col.id)}">Rename</button>
+        <button class="action-btn sm danger collection-delete-btn" data-id="${esc(col.id)}">Delete</button>
+      </div>
+      <div class="games-grid collection-games" data-id="${esc(col.id)}"></div>
+    </div>
+  `).join('');
+
+  // Render games per collection
+  collectionsCache.forEach(col => {
+    const container = $list.querySelector(`.collection-games[data-id="${col.id}"]`) as HTMLElement | null;
+    if (!container) return;
+    const games = col.game_ids.map(id => findGameById(id)).filter((g): g is GameInfo => g !== null);
+    if (games.length === 0) {
+      container.innerHTML = '<div class="collection-empty">Empty. Right-click a game card to add it.</div>';
+      return;
+    }
+    container.innerHTML = games.map((g, i) => buildGameCardHTML(g, i, true)).join('');
+    attachGameCardEvents(container, games);
+  });
+
+  $list.querySelectorAll('.collection-rename-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = (btn as HTMLElement).dataset.id!;
+      const col = collectionsCache.find(c => c.id === id);
+      const newName = prompt('Rename collection', col?.name || '');
+      if (newName && newName.trim()) {
+        await updateCollection(id, { name: newName.trim() });
+        renderCollectionsTab();
+      }
+    });
+  });
+  $list.querySelectorAll('.collection-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = (btn as HTMLElement).dataset.id!;
+      const col = collectionsCache.find(c => c.id === id);
+      if (confirm(`Delete collection "${col?.name}"?`)) {
+        await deleteCollection(id);
+        renderCollectionsTab();
+      }
+    });
+  });
+}
+
+// ── Resume bar (Continue last game) ───────────────────────────────
+
+async function renderResumeBar() {
+  const $bar = document.getElementById('resume-bar')!;
+  const $cover = document.getElementById('resume-bar-cover')!;
+  const $title = document.getElementById('resume-bar-title')!;
+  const $meta = document.getElementById('resume-bar-meta')!;
+  const $play = document.getElementById('resume-bar-play')!;
+  if (!lastPlayedCache) {
+    $bar.classList.add('hidden');
+    return;
+  }
+  const stat = lastPlayedCache;
+  const game = findGameById(stat.game_id);
+  const sysName = systems.find(s => s.id === stat.system)?.name || stat.system;
+  $cover.innerHTML = game?.image_path
+    ? `<img src="${game.image_path}" alt="${esc(stat.name)}" />`
+    : `<div class="placeholder">🎮</div>`;
+  $title.textContent = stat.name;
+  $meta.textContent = `${sysName} · Played ${formatPlaytime(stat.total_seconds)} · ${formatTimeAgo(stat.last_played_at)}`;
+  $bar.classList.remove('hidden');
+  $play.onclick = () => {
+    if (!game) return;
+    playGame(game);
+  };
+}
+
+let allGamesSearchQuery = '';
+type ViewMode = 'grid' | 'list';
+let allGamesViewMode: ViewMode = (localStorage.getItem('allGamesViewMode') as ViewMode) || 'grid';
+
+function buildGameRowHTML(game: GameInfo, idx: number): string {
+  const fav = isFavourite(game.id);
+  const sysName = systems.find(s => s.id === game.system)?.name || game.system;
+  const pt = recentPlaytimeCache.find(s => s.game_id === game.id);
+  const ptStr = pt ? formatPlaytime(pt.total_seconds) : '';
+  const lpStr = pt?.last_played_at ? formatTimeAgo(pt.last_played_at) : '';
+  return `
+    <div class="game-row" data-game-idx="${idx}">
+      <div class="game-row-thumb">
+        ${game.image_path
+          ? `<img src="${game.image_path}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'placeholder\\'>🎮</div>'" />`
+          : `<div class="placeholder">🎮</div>`}
+      </div>
+      <div class="game-row-name" title="${esc(game.name)}">${esc(game.name)}</div>
+      <div class="game-row-system">${esc(sysName)}</div>
+      <div class="game-row-playtime">${ptStr}</div>
+      <div class="game-row-last">${lpStr}</div>
+      <div class="game-row-actions">
+        <button class="row-fav-btn${fav ? ' active' : ''}" data-game-id="${esc(game.id)}" title="${fav ? 'Remove favourite' : 'Add favourite'}">${fav ? '&#9829;' : '&#9825;'}</button>
+        <button class="row-edit-btn" data-edit-game-idx="${idx}" title="Edit art">&#9999;&#65039;</button>
+        <button class="row-play-btn" data-play-game-idx="${idx}" title="Play">&#9654;</button>
+      </div>
+    </div>`;
+}
+
+function attachGameRowEvents(container: HTMLElement, list: GameInfo[]) {
+  container.querySelectorAll('.game-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('.row-fav-btn') || t.closest('.row-edit-btn') || t.closest('.row-play-btn')) return;
+      const idx = parseInt((row as HTMLElement).dataset.gameIdx!, 10);
+      const game = list[idx];
+      if (game) openGameDetail(game);
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const idx = parseInt((row as HTMLElement).dataset.gameIdx!, 10);
+      const game = list[idx];
+      if (game) openGameCardMenu(game, e as MouseEvent);
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('.row-fav-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const gameId = btn.dataset.gameId!;
+      const nowFav = toggleFavourite(gameId);
+      btn.classList.toggle('active', nowFav);
+      btn.innerHTML = nowFav ? '&#9829;' : '&#9825;';
+      btn.title = nowFav ? 'Remove favourite' : 'Add favourite';
+      if (activeMainTab === 'favourites') renderFavouritesTab();
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('.row-edit-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.editGameIdx!, 10);
+      const game = list[idx];
+      if (game) openEditArt({ kind: 'game', game });
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('.row-play-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.playGameIdx!, 10);
+      const game = list[idx];
+      if (game) playGame(game);
+    });
+  });
 }
 
 async function renderAllGamesTab() {
@@ -535,6 +1045,7 @@ async function renderAllGamesTab() {
   const $count = document.getElementById('all-games-count')!;
   const $sort = document.getElementById('all-games-sort') as HTMLSelectElement;
   const $filter = document.getElementById('all-games-system-filter') as HTMLSelectElement;
+  const $showHidden = document.getElementById('show-hidden-toggle') as HTMLInputElement | null;
 
   // Populate system filter if empty
   if ($filter.options.length <= 1) {
@@ -557,10 +1068,228 @@ async function renderAllGamesTab() {
   const systemFilter = $filter.value;
   if (systemFilter) filtered = filtered.filter(g => g.system === systemFilter);
 
-  const sorted = sortGames(filtered, $sort.value);
-  $count.textContent = `${sorted.length} games`;
-  $grid.innerHTML = sorted.map((game, i) => buildGameCardHTML(game, i, true)).join('');
-  attachGameCardEvents($grid, sorted);
+  // Hidden filtering (server already filters by default; toggle re-fetches with include_hidden)
+  if ($showHidden?.checked) {
+    // Backend filters hidden by default. To show hidden, ask for them inline:
+    // simpler approach — locally include the hidden ids by re-fetching with include_hidden flag.
+    // We don't re-fetch here; allGamesCache might already exclude hidden.
+    // If hidden games not present in cache, refetch including hidden:
+    if (hiddenGameIds.size > 0 && !filtered.some(g => hiddenGameIds.has(g.id))) {
+      try {
+        const full = await fetch(`/api/games?include_hidden=true`).then(r => r.json());
+        allGamesCache = full;
+        filtered = systemFilter ? full.filter((g: GameInfo) => g.system === systemFilter) : full;
+      } catch { /* keep current */ }
+    }
+  } else if (hiddenGameIds.size > 0) {
+    filtered = filtered.filter(g => !hiddenGameIds.has(g.id));
+  }
+
+  // Smart search (fuzzy)
+  if (allGamesSearchQuery) {
+    filtered = fuzzyFilterGames(filtered, allGamesSearchQuery);
+  }
+
+  const sorted = allGamesSearchQuery ? filtered : sortGames(filtered, $sort.value);
+  $count.textContent = allGamesSearchQuery
+    ? `${sorted.length} match`
+    : `${sorted.length} games`;
+
+  if (allGamesViewMode === 'list') {
+    unmountVirtualGameGrid($grid);
+    $grid.classList.remove('games-grid');
+    $grid.classList.add('games-list');
+    $grid.innerHTML = `
+      <div class="game-list-header">
+        <div></div>
+        <div>Name</div>
+        <div>System</div>
+        <div>Playtime</div>
+        <div>Last Played</div>
+        <div></div>
+      </div>
+    ` + sorted.map((game, i) => buildGameRowHTML(game, i)).join('');
+    attachGameRowEvents($grid, sorted);
+    return;
+  }
+
+  $grid.classList.remove('games-list');
+  $grid.classList.add('games-grid');
+  // Virtualized for large libraries (>200 cards), simple render otherwise
+  if (sorted.length > 200) {
+    mountVirtualGameGrid($grid, sorted, true);
+  } else {
+    unmountVirtualGameGrid($grid);
+    $grid.innerHTML = sorted.map((game, i) => buildGameCardHTML(game, i, true)).join('');
+    attachGameCardEvents($grid, sorted);
+  }
+}
+
+// ── Virtualized Game Grid ───────────────────────────────────────────────
+//
+// For libraries with thousands of games. Renders only the rows currently in view
+// plus a buffer above/below. Reads card dimensions from the live grid CSS so the
+// layout exactly matches the non-virtualized case.
+
+interface VirtualGridState {
+  scrollHandler: () => void;
+  resizeObserver: ResizeObserver;
+  games: GameInfo[];
+  showSystem: boolean;
+  rowHeight: number;
+  cols: number;
+  rafId: number | null;
+  scrollTargets: EventTarget[];
+  lastWidth: number;
+}
+
+const virtualGridState: WeakMap<HTMLElement, VirtualGridState> = new WeakMap();
+
+function measureGridCols(container: HTMLElement): { cols: number; rowHeight: number; cardWidth: number } {
+  // Probe with TWO dummy cards in a fresh grid so column flow is correct and
+  // existing children (e.g. a tall virtual spacer) can't inflate row height via stretch.
+  // We use a sibling sandbox that mirrors the games-grid CSS but is isolated from
+  // any prior virtualization state.
+  const sandbox = document.createElement('div');
+  sandbox.className = 'games-grid';
+  sandbox.style.cssText = 'visibility:hidden;position:absolute;top:0;left:0;width:' + container.clientWidth + 'px;pointer-events:none;';
+  const probe = document.createElement('div');
+  probe.className = 'game-card';
+  probe.innerHTML = '<div class="game-image"><div class="placeholder">x</div></div><div class="game-info"><div class="game-title">x</div></div>';
+  sandbox.appendChild(probe);
+  // Insert sandbox adjacent to container so it inherits parent context (fonts, etc.)
+  container.parentElement!.appendChild(sandbox);
+  const cardRect = probe.getBoundingClientRect();
+  const cardWidth = cardRect.width || 160;
+  const cardHeight = cardRect.height || 220;
+  const sandboxStyle = getComputedStyle(sandbox);
+  const gap = parseFloat(sandboxStyle.gap) || 14;
+  sandbox.remove();
+
+  const containerWidth = container.clientWidth;
+  const cols = Math.max(1, Math.floor((containerWidth + gap) / (cardWidth + gap)));
+  const rowHeight = cardHeight + gap;
+  return { cols, rowHeight, cardWidth };
+}
+
+function mountVirtualGameGrid(container: HTMLElement, games: GameInfo[], showSystem: boolean) {
+  // Tear down previous state if any (also clears innerHTML so leftover spacer can't bias measurement)
+  unmountVirtualGameGrid(container);
+  container.innerHTML = '';
+
+  const initialWidth = container.clientWidth;
+  const { cols, rowHeight } = measureGridCols(container);
+  container.classList.add('virtual-grid');
+
+  const totalRows = Math.ceil(games.length / cols);
+  const totalHeight = totalRows * rowHeight;
+
+  // Spacer creates scroll height
+  const spacer = document.createElement('div');
+  spacer.className = 'virtual-grid-spacer';
+  spacer.style.height = `${totalHeight}px`;
+  container.appendChild(spacer);
+
+  // Window holds visible cards (absolutely positioned within container)
+  const win = document.createElement('div');
+  win.className = 'virtual-grid-window';
+  container.appendChild(win);
+
+  // Scroll container is the nearest scrollable parent. For document-level scroll
+  // it can be documentElement, body, or both — we listen on every plausible target.
+  const scroller = findScroller(container);
+  const isDocLevel = scroller === document.scrollingElement
+    || scroller === document.documentElement
+    || scroller === document.body;
+  // Bundle all event targets that might fire scroll for the document scroller.
+  const scrollTargets: EventTarget[] = isDocLevel
+    ? [window, document, document.documentElement, document.body]
+    : [scroller];
+  const state: VirtualGridState = {
+    scrollHandler: () => scheduleRender(),
+    resizeObserver: new ResizeObserver((entries) => {
+      // Only re-mount when WIDTH changes (cols depend on width).
+      // Height changes from adding the spacer would otherwise create an infinite remount loop.
+      const w = entries[0]?.contentRect.width ?? container.clientWidth;
+      if (Math.abs(w - state.lastWidth) > 1) {
+        state.lastWidth = w;
+        mountVirtualGameGrid(container, games, showSystem);
+      }
+    }),
+    games, showSystem, rowHeight, cols, rafId: null,
+    scrollTargets,
+    lastWidth: initialWidth,
+  };
+  virtualGridState.set(container, state);
+
+  function scheduleRender() {
+    if (state.rafId !== null) return;
+    state.rafId = requestAnimationFrame(() => {
+      state.rafId = null;
+      render();
+    });
+  }
+
+  function render() {
+    const containerRect = container.getBoundingClientRect();
+    // Position of the visible window within container coords
+    let visibleTop: number;
+    let visibleHeight: number;
+    if (isDocLevel) {
+      // Page-level scroll: container's top moves negative as user scrolls past it.
+      // visibleHeight is always the viewport height regardless of which element is the actual scroller.
+      visibleTop = Math.max(0, -containerRect.top);
+      visibleHeight = window.innerHeight;
+    } else {
+      const scrollerRect = scroller.getBoundingClientRect();
+      visibleTop = Math.max(0, scrollerRect.top - containerRect.top);
+      visibleHeight = scroller.clientHeight;
+    }
+    const visibleBottom = visibleTop + visibleHeight;
+    const startRow = Math.max(0, Math.floor(visibleTop / rowHeight) - 2);
+    const endRow = Math.min(totalRows, Math.ceil(visibleBottom / rowHeight) + 2);
+    const startIdx = startRow * cols;
+    const endIdx = Math.min(games.length, endRow * cols);
+
+    win.style.position = 'absolute';
+    win.style.left = '0';
+    win.style.right = '0';
+    win.style.top = `${startRow * rowHeight}px`;
+    win.style.display = 'grid';
+    win.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    win.style.gap = getComputedStyle(container).gap;
+
+    const slice = games.slice(startIdx, endIdx);
+    win.innerHTML = slice.map((g, i) => buildGameCardHTML(g, startIdx + i, showSystem)).join('');
+    attachGameCardEvents(win, games);
+  }
+
+  scrollTargets.forEach(t => t.addEventListener('scroll', state.scrollHandler, { passive: true }));
+  window.addEventListener('resize', state.scrollHandler);
+  state.resizeObserver.observe(container);
+  render();
+}
+
+function unmountVirtualGameGrid(container: HTMLElement) {
+  const state = virtualGridState.get(container);
+  if (!state) return;
+  state.scrollTargets.forEach(t => t.removeEventListener('scroll', state.scrollHandler));
+  window.removeEventListener('resize', state.scrollHandler);
+  state.resizeObserver.disconnect();
+  if (state.rafId !== null) cancelAnimationFrame(state.rafId);
+  virtualGridState.delete(container);
+  container.classList.remove('virtual-grid');
+}
+
+function findScroller(el: HTMLElement): HTMLElement {
+  let node: HTMLElement | null = el.parentElement;
+  while (node) {
+    const style = getComputedStyle(node);
+    const oy = style.overflowY;
+    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') return node;
+    node = node.parentElement;
+  }
+  return document.scrollingElement as HTMLElement || document.documentElement;
 }
 
 function renderFavouritesTab() {
@@ -588,7 +1317,16 @@ function playGame(game: GameInfo) {
   currentSystem = sys;
   $playerTitle.textContent = game.name;
   showView('player');
-  launchGame(game, sys, 'emulator-container');
+  void beginPlaytimeSession(game);
+  void launchGameWithConfig(game, sys, 'emulator-container');
+}
+
+async function launchGameWithConfig(game: GameInfo, sys: SystemInfo, containerId: string) {
+  let override: GameLaunchConfig = {};
+  try { override = await fetchGameConfig(game.system, game.file); }
+  catch { /* ignore */ }
+  const sysToUse: SystemInfo = override.core ? { ...sys, core: override.core } : sys;
+  launchGame(game, sysToUse, containerId);
 }
 
 // ── Game Detail View ─────────────────────────────────────────────────
@@ -696,6 +1434,476 @@ function showScrapeStatus(msg: string, duration = 3000) {
   setTimeout(() => $status.classList.add('hidden'), duration);
 }
 
+// ── Edit Art Modal ──────────────────────────────────────────────────
+
+type EditArtTarget =
+  | { kind: 'game'; game: GameInfo }
+  | { kind: 'system'; system: SystemInfo };
+
+let editArtTarget: EditArtTarget | null = null;
+let editArtSearched = false;
+
+function setEditArtStatus(elId: string, msg: string, kind: '' | 'success' | 'error' = '') {
+  const $el = document.getElementById(elId)!;
+  $el.textContent = msg;
+  $el.classList.remove('success', 'error');
+  if (kind) $el.classList.add(kind);
+}
+
+function setEditArtCurrentPreview(url: string | null) {
+  const $preview = document.getElementById('edit-art-current-preview')!;
+  if (url) {
+    $preview.innerHTML = `<img src="${url}" alt="" onerror="this.parentElement.innerHTML='<div class=\\'placeholder\\'>&#127918;</div>'" />`;
+  } else {
+    $preview.innerHTML = '<div class="placeholder">&#127918;</div>';
+  }
+}
+
+function defaultEditArtQuery(): string {
+  if (!editArtTarget) return '';
+  if (editArtTarget.kind === 'game') {
+    return `${editArtTarget.game.name} ${editArtTarget.game.system} box art`;
+  }
+  return `${editArtTarget.system.name} console logo`;
+}
+
+function openEditArt(target: EditArtTarget) {
+  editArtTarget = target;
+  editArtSearched = false;
+
+  const $modal = document.getElementById('edit-art-modal')!;
+  const $title = document.getElementById('edit-art-title')!;
+  const $searchInput = document.getElementById('edit-art-search-input') as HTMLInputElement;
+  const $urlInput = document.getElementById('edit-art-url-input') as HTMLInputElement;
+  const $googleLink = document.getElementById('edit-art-google-link') as HTMLAnchorElement;
+  const $results = document.getElementById('edit-art-search-results')!;
+  const $resetTab = document.getElementById('edit-art-tab-reset')!;
+  const $resetHint = document.getElementById('edit-art-reset-hint')!;
+
+  // Title + current preview
+  if (target.kind === 'game') {
+    $title.textContent = `Edit Art: ${target.game.name}`;
+    setEditArtCurrentPreview(target.game.image_path);
+    // Reset tab only makes sense for system (remove override). Hide for games.
+    $resetTab.classList.add('hidden');
+    $resetHint.textContent = '';
+  } else {
+    $title.textContent = `Edit Art: ${target.system.name}`;
+    setEditArtCurrentPreview(target.system.cover_image);
+    $resetTab.classList.remove('hidden');
+    $resetHint.textContent = 'Remove the custom system art override and revert to the auto-picked cover.';
+  }
+
+  // Reset inputs/state
+  $searchInput.value = defaultEditArtQuery();
+  $urlInput.value = '';
+  $results.innerHTML = '';
+  setEditArtStatus('edit-art-search-status', '');
+  setEditArtStatus('edit-art-upload-status', '');
+  setEditArtStatus('edit-art-url-status', '');
+  setEditArtStatus('edit-art-reset-status', '');
+
+  // Default to search tab
+  document.querySelectorAll('.edit-art-tab').forEach(t => {
+    t.classList.toggle('active', (t as HTMLElement).dataset.editArtTab === 'search');
+  });
+  document.querySelectorAll('.edit-art-tab-content').forEach(c => {
+    c.classList.toggle('active', c.id === 'edit-art-tab-search');
+  });
+
+  // Google fallback link
+  $googleLink.href = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(defaultEditArtQuery())}`;
+
+  $modal.classList.remove('hidden');
+  setTimeout(() => $searchInput.focus(), 50);
+}
+
+function closeEditArt() {
+  document.getElementById('edit-art-modal')!.classList.add('hidden');
+  editArtTarget = null;
+}
+
+async function runEditArtSearch() {
+  if (!editArtTarget) return;
+  const $input = document.getElementById('edit-art-search-input') as HTMLInputElement;
+  const $results = document.getElementById('edit-art-search-results')!;
+  const $googleLink = document.getElementById('edit-art-google-link') as HTMLAnchorElement;
+  const query = $input.value.trim();
+  if (!query) {
+    setEditArtStatus('edit-art-search-status', 'Enter a search query.', 'error');
+    return;
+  }
+  $googleLink.href = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
+  setEditArtStatus('edit-art-search-status', 'Searching...');
+  $results.innerHTML = '';
+  try {
+    const res = await searchImages(query);
+    editArtSearched = true;
+    if (!res.ok || res.image_urls.length === 0) {
+      setEditArtStatus('edit-art-search-status', 'No results. Try a different query or use the URL tab.', 'error');
+      return;
+    }
+    setEditArtStatus('edit-art-search-status', `${res.image_urls.length} results — click one to apply.`, 'success');
+    $results.innerHTML = res.image_urls.map((r, i) => `
+      <div class="img-result" data-idx="${i}" title="${esc(r.title || r.source || '')}">
+        <img src="${esc(r.thumbnail || r.image)}" loading="lazy" referrerpolicy="no-referrer" alt="" onerror="this.style.opacity='0.2'" />
+        <div class="img-result-title">${esc(r.title || r.source || '')}</div>
+      </div>
+    `).join('');
+    $results.querySelectorAll('.img-result').forEach(el => {
+      el.addEventListener('click', async () => {
+        const idx = parseInt((el as HTMLElement).dataset.idx!, 10);
+        const hit = res.image_urls[idx];
+        if (!hit) return;
+        await applyEditArtFromUrl(hit.image, el as HTMLElement);
+      });
+    });
+  } catch (e: any) {
+    setEditArtStatus('edit-art-search-status', `Search failed: ${e?.message || e}`, 'error');
+  }
+}
+
+async function applyEditArtFromUrl(url: string, sourceEl?: HTMLElement) {
+  if (!editArtTarget) return;
+  if (sourceEl) sourceEl.classList.add('applying');
+  const target = editArtTarget;
+  const statusEl = sourceEl ? 'edit-art-search-status' : 'edit-art-url-status';
+  setEditArtStatus(statusEl, 'Applying...');
+  try {
+    if (target.kind === 'game') {
+      const res = await applyArtUrl(target.game.system, target.game.file, url);
+      if (res.ok && res.image_path) {
+        const cacheBust = `${res.image_path}?t=${Date.now()}`;
+        target.game.image_path = res.image_path;
+        target.game.has_image = true;
+        setEditArtCurrentPreview(cacheBust);
+        setEditArtStatus(statusEl, 'Applied!', 'success');
+        afterArtChanged(target);
+      } else {
+        setEditArtStatus(statusEl, `Failed: ${res.message || 'unknown'}`, 'error');
+      }
+    } else {
+      const res = await applySystemArtUrl(target.system.id, url);
+      if (res.ok && res.cover_image) {
+        const cacheBust = `${res.cover_image}?t=${Date.now()}`;
+        target.system.cover_image = res.cover_image;
+        setEditArtCurrentPreview(cacheBust);
+        setEditArtStatus(statusEl, 'Applied!', 'success');
+        afterArtChanged(target);
+      } else {
+        setEditArtStatus(statusEl, `Failed: ${res.message || 'unknown'}`, 'error');
+      }
+    }
+  } catch (e: any) {
+    setEditArtStatus(statusEl, `Failed: ${e?.message || e}`, 'error');
+  }
+  if (sourceEl) sourceEl.classList.remove('applying');
+}
+
+async function applyEditArtFromBlob(blob: Blob) {
+  if (!editArtTarget) return;
+  const target = editArtTarget;
+  setEditArtStatus('edit-art-upload-status', 'Uploading...');
+  try {
+    if (target.kind === 'game') {
+      const res = await uploadArt(target.game.system, target.game.file, blob);
+      if (res.ok && res.image_path) {
+        const cacheBust = `${res.image_path}?t=${Date.now()}`;
+        target.game.image_path = res.image_path;
+        target.game.has_image = true;
+        setEditArtCurrentPreview(cacheBust);
+        setEditArtStatus('edit-art-upload-status', 'Uploaded!', 'success');
+        afterArtChanged(target);
+      } else {
+        setEditArtStatus('edit-art-upload-status', `Failed: ${res.message || 'unknown'}`, 'error');
+      }
+    } else {
+      const res = await uploadSystemArt(target.system.id, blob);
+      if (res.ok && res.cover_image) {
+        const cacheBust = `${res.cover_image}?t=${Date.now()}`;
+        target.system.cover_image = res.cover_image;
+        setEditArtCurrentPreview(cacheBust);
+        setEditArtStatus('edit-art-upload-status', 'Uploaded!', 'success');
+        afterArtChanged(target);
+      } else {
+        setEditArtStatus('edit-art-upload-status', `Failed: ${res.message || 'unknown'}`, 'error');
+      }
+    }
+  } catch (e: any) {
+    setEditArtStatus('edit-art-upload-status', `Failed: ${e?.message || e}`, 'error');
+  }
+}
+
+async function resetSystemArt() {
+  if (!editArtTarget || editArtTarget.kind !== 'system') return;
+  const target = editArtTarget;
+  setEditArtStatus('edit-art-reset-status', 'Removing...');
+  try {
+    const res = await clearSystemArt(target.system.id);
+    if (res.ok) {
+      // Refresh systems and update preview to the new auto-picked cover
+      try {
+        systems = await fetchSystems();
+        const updated = systems.find(s => s.id === target.system.id);
+        if (updated) {
+          target.system.cover_image = updated.cover_image;
+          setEditArtCurrentPreview(updated.cover_image);
+        }
+      } catch { /* ignore */ }
+      setEditArtStatus('edit-art-reset-status', res.removed ? 'Removed.' : 'No custom art was set.', 'success');
+      afterArtChanged(target);
+    } else {
+      setEditArtStatus('edit-art-reset-status', 'Failed to remove.', 'error');
+    }
+  } catch (e: any) {
+    setEditArtStatus('edit-art-reset-status', `Failed: ${e?.message || e}`, 'error');
+  }
+}
+
+function afterArtChanged(target: EditArtTarget) {
+  // Refresh visible views so the new art shows up immediately.
+  if (target.kind === 'game') {
+    // If detail view is showing this game, update cover + backdrop
+    if (currentDetailGame && currentDetailGame.id === target.game.id) {
+      const $cover = document.getElementById('detail-cover');
+      const $backdropImg = document.getElementById('detail-backdrop-img') as HTMLImageElement | null;
+      if ($cover && target.game.image_path) {
+        const bust = `${target.game.image_path}?t=${Date.now()}`;
+        $cover.innerHTML = `<img src="${bust}" alt="${esc(target.game.name)}" />`;
+        if ($backdropImg) {
+          $backdropImg.src = bust;
+          $backdropImg.onload = () => $backdropImg.classList.add('loaded');
+        }
+      }
+    }
+    // Refresh visible game grids
+    const cards = document.querySelectorAll<HTMLImageElement>('.game-card img');
+    cards.forEach(img => {
+      if (img.alt === target.game.name && target.game.image_path) {
+        img.src = `${target.game.image_path}?t=${Date.now()}`;
+      }
+    });
+  } else {
+    // System: re-render systems grid if it's mounted
+    try { renderSystems(systems); } catch { /* ignore */ }
+  }
+}
+
+function initEditArtModal() {
+  const $modal = document.getElementById('edit-art-modal')!;
+  const $close = document.getElementById('edit-art-close-btn')!;
+  $close.addEventListener('click', closeEditArt);
+  $modal.addEventListener('click', (e) => { if (e.target === $modal) closeEditArt(); });
+
+  // Tabs
+  document.querySelectorAll('.edit-art-tab').forEach(t => {
+    t.addEventListener('click', () => {
+      const tab = (t as HTMLElement).dataset.editArtTab!;
+      document.querySelectorAll('.edit-art-tab').forEach(x => x.classList.toggle('active', (x as HTMLElement).dataset.editArtTab === tab));
+      document.querySelectorAll('.edit-art-tab-content').forEach(c => c.classList.toggle('active', c.id === `edit-art-tab-${tab}`));
+      // Auto-run first search when switching into search tab if not searched yet
+      if (tab === 'search' && !editArtSearched) {
+        runEditArtSearch();
+      }
+    });
+  });
+
+  // Search
+  document.getElementById('edit-art-search-btn')!.addEventListener('click', runEditArtSearch);
+  const $searchInput = document.getElementById('edit-art-search-input') as HTMLInputElement;
+  $searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runEditArtSearch(); });
+
+  // URL apply
+  document.getElementById('edit-art-url-btn')!.addEventListener('click', () => {
+    const $input = document.getElementById('edit-art-url-input') as HTMLInputElement;
+    const url = $input.value.trim();
+    if (!url) { setEditArtStatus('edit-art-url-status', 'Paste an image URL first.', 'error'); return; }
+    applyEditArtFromUrl(url);
+  });
+  const $urlInput = document.getElementById('edit-art-url-input') as HTMLInputElement;
+  $urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('edit-art-url-btn')!.click();
+  });
+
+  // Upload (file input + drag/drop)
+  const $drop = document.getElementById('edit-art-drop')!;
+  const $file = document.getElementById('edit-art-file') as HTMLInputElement;
+  $drop.addEventListener('click', () => $file.click());
+  $file.addEventListener('change', () => {
+    const f = $file.files?.[0];
+    if (f) applyEditArtFromBlob(f);
+    $file.value = '';
+  });
+  $drop.addEventListener('dragover', (e) => { e.preventDefault(); $drop.classList.add('dragover'); });
+  $drop.addEventListener('dragleave', () => $drop.classList.remove('dragover'));
+  $drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    $drop.classList.remove('dragover');
+    const f = e.dataTransfer?.files?.[0];
+    if (f && f.type.startsWith('image/')) applyEditArtFromBlob(f);
+    else setEditArtStatus('edit-art-upload-status', 'Drop an image file.', 'error');
+  });
+
+  // Reset (system only)
+  document.getElementById('edit-art-reset-btn')!.addEventListener('click', resetSystemArt);
+
+  // Escape closes
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$modal.classList.contains('hidden')) closeEditArt();
+  });
+}
+
+// ── Launch Config tab ─────────────────────────────────────────────
+
+async function renderLaunchConfigTab(game: GameInfo) {
+  const $launch = document.getElementById('detail-launch')!;
+  $launch.innerHTML = '<div class="detail-meta-loading">Loading...</div>';
+  try {
+    const [cfg, alternates] = await Promise.all([
+      fetchGameConfig(game.system, game.file),
+      fetchAlternateCores(game.system),
+    ]);
+    const defaultCore = systems.find(s => s.id === game.system)?.core || alternates[0] || '';
+    const selected = cfg.core || defaultCore;
+    const opts = alternates.length === 0 ? [defaultCore] : alternates;
+
+    $launch.innerHTML = `
+      <div class="launch-config">
+        <div class="launch-config-row">
+          <label class="launch-config-label">Emulator Core</label>
+          <select id="launch-core-select" class="setting-input compact-select">
+            ${opts.map(c => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}${c === defaultCore ? ' (default)' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <p class="setting-hint">Different cores have different trade-offs (speed vs. accuracy). Changes apply on next launch.</p>
+        <div class="launch-config-row">
+          <button id="launch-config-save" class="action-btn">Save</button>
+          <button id="launch-config-reset" class="action-btn sm danger">Reset to default</button>
+          <span id="launch-config-status" class="setting-hint" style="margin:0;"></span>
+        </div>
+        <div class="launch-config-info">
+          <strong>Current playtime:</strong> ${formatPlaytime((recentPlaytimeCache.find(s => s.game_id === game.id)?.total_seconds) || 0)}
+          <br><strong>Play count:</strong> ${(recentPlaytimeCache.find(s => s.game_id === game.id)?.play_count) || 0}
+        </div>
+      </div>
+    `;
+    const $sel = document.getElementById('launch-core-select') as HTMLSelectElement;
+    const $save = document.getElementById('launch-config-save')!;
+    const $reset = document.getElementById('launch-config-reset')!;
+    const $status = document.getElementById('launch-config-status')!;
+    $save.addEventListener('click', async () => {
+      const core = $sel.value === defaultCore ? undefined : $sel.value;
+      await saveGameConfig(game.system, game.file, { core });
+      $status.textContent = '✓ Saved';
+      setTimeout(() => { $status.textContent = ''; }, 2000);
+    });
+    $reset.addEventListener('click', async () => {
+      await saveGameConfig(game.system, game.file, {});
+      $sel.value = defaultCore;
+      $status.textContent = '✓ Reset';
+      setTimeout(() => { $status.textContent = ''; }, 2000);
+    });
+  } catch {
+    $launch.innerHTML = '<p class="setting-hint">Failed to load launch config.</p>';
+  }
+}
+
+// ── Save State Browser ────────────────────────────────────────────
+
+interface SaveStateEntry {
+  slot: number;
+  screenshot: string | null;
+  timestamp: number;
+}
+
+const SAVE_STATES_KEY_PREFIX = 'retroweb-savestates-';
+
+function loadSaveStates(gameId: string): SaveStateEntry[] {
+  try {
+    const raw = localStorage.getItem(SAVE_STATES_KEY_PREFIX + gameId);
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return [];
+}
+
+function saveSaveStates(gameId: string, states: SaveStateEntry[]): void {
+  localStorage.setItem(SAVE_STATES_KEY_PREFIX + gameId, JSON.stringify(states));
+}
+
+function captureEmulatorScreenshot(iframe: HTMLIFrameElement | null): string | null {
+  if (!iframe?.contentDocument) return null;
+  try {
+    const canvas = iframe.contentDocument.querySelector('canvas') as HTMLCanvasElement | null;
+    if (!canvas) return null;
+    // Downscale to 320 wide for storage efficiency
+    const scale = Math.min(1, 320 / canvas.width);
+    const w = Math.round(canvas.width * scale);
+    const h = Math.round(canvas.height * scale);
+    const off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    off.getContext('2d')?.drawImage(canvas, 0, 0, w, h);
+    return off.toDataURL('image/jpeg', 0.6);
+  } catch { return null; }
+}
+
+function recordSaveStateSlot(gameId: string, slot: number, screenshot: string | null) {
+  const states = loadSaveStates(gameId);
+  const existing = states.findIndex(s => s.slot === slot);
+  const entry: SaveStateEntry = { slot, screenshot, timestamp: Date.now() };
+  if (existing >= 0) states[existing] = entry;
+  else states.push(entry);
+  saveSaveStates(gameId, states);
+}
+
+function renderSaveStatesTab(game: GameInfo) {
+  const $saves = document.getElementById('detail-saves')!;
+  const states = loadSaveStates(game.id).sort((a, b) => a.slot - b.slot);
+
+  if (states.length === 0) {
+    $saves.innerHTML = `
+      <p class="setting-hint">No save states yet. Use <code>Select + R1</code> while playing to quick-save.</p>
+      <p class="setting-hint">Save states are stored by EmulatorJS in your browser. RetroWeb tracks slot metadata here.</p>
+    `;
+    return;
+  }
+
+  $saves.innerHTML = `
+    <div class="save-states-grid">
+      ${states.map(s => `
+        <div class="save-state-card" data-slot="${s.slot}">
+          <div class="save-state-img">
+            ${s.screenshot
+              ? `<img src="${esc(s.screenshot)}" alt="Slot ${s.slot}" />`
+              : `<div class="placeholder">💾</div>`}
+            <div class="save-state-slot">Slot ${s.slot}</div>
+          </div>
+          <div class="save-state-info">
+            <div class="save-state-time">${formatTimeAgo(Math.floor(s.timestamp / 1000))}</div>
+            <button class="action-btn sm save-state-load" data-slot="${s.slot}">Load</button>
+            <button class="action-btn sm danger save-state-delete" data-slot="${s.slot}">Delete</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  $saves.querySelectorAll('.save-state-load').forEach(btn => {
+    btn.addEventListener('click', () => {
+      // Launch game; EmulatorJS will load slot on next play
+      const slot = parseInt((btn as HTMLElement).dataset.slot!, 10);
+      sessionStorage.setItem('retroweb-load-slot', String(slot));
+      playGame(game);
+    });
+  });
+  $saves.querySelectorAll('.save-state-delete').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const slot = parseInt((btn as HTMLElement).dataset.slot!, 10);
+      const states = loadSaveStates(game.id).filter(s => s.slot !== slot);
+      saveSaveStates(game.id, states);
+      renderSaveStatesTab(game);
+    });
+  });
+}
+
 async function openGameDetail(game: GameInfo) {
   currentDetailGame = game;
   const $title = document.getElementById('detail-title')!;
@@ -703,6 +1911,7 @@ async function openGameDetail(game: GameInfo) {
   const $meta = document.getElementById('detail-meta')!;
   const $playBtn = document.getElementById('detail-play-btn')!;
   const $scrapeArtBtn = document.getElementById('detail-scrape-art-btn')!;
+  const $editArtBtn = document.getElementById('detail-edit-art-btn')!;
   const $scrapeInfoBtn = document.getElementById('detail-scrape-info-btn')!;
   const $searchMediaBtn = document.getElementById('detail-search-media-btn')!;
   const $backdropImg = document.getElementById('detail-backdrop-img') as HTMLImageElement;
@@ -719,6 +1928,17 @@ async function openGameDetail(game: GameInfo) {
     $cover.innerHTML = '<div class="placeholder">&#127918;</div>';
     $backdropImg.src = '';
   }
+
+  // Hero banner + logo (probe; if 404 hide)
+  const $banner = document.getElementById('detail-hero-banner') as HTMLImageElement;
+  const $logo = document.getElementById('detail-hero-logo') as HTMLImageElement;
+  $banner.classList.remove('loaded'); $logo.classList.remove('loaded');
+  $banner.src = bannerUrl(game.system, game.file);
+  $banner.onload = () => $banner.classList.add('loaded');
+  $banner.onerror = () => $banner.classList.remove('loaded');
+  $logo.src = logoUrl(game.system, game.file);
+  $logo.onload = () => $logo.classList.add('loaded');
+  $logo.onerror = () => $logo.classList.remove('loaded');
 
   // Loading state for meta
   $meta.innerHTML = '<div class="detail-meta-loading">Loading metadata...</div>';
@@ -742,6 +1962,15 @@ async function openGameDetail(game: GameInfo) {
 
   const newArtBtn = $scrapeArtBtn.cloneNode(true) as HTMLButtonElement;
   $scrapeArtBtn.parentNode!.replaceChild(newArtBtn, $scrapeArtBtn);
+
+  const newEditArtBtn = $editArtBtn.cloneNode(true) as HTMLButtonElement;
+  $editArtBtn.parentNode!.replaceChild(newEditArtBtn, $editArtBtn);
+  newEditArtBtn.addEventListener('click', () => openEditArt({ kind: 'game', game }));
+
+  // Click the cover to open the Edit Art modal — most useful when art is missing
+  $cover.style.cursor = 'pointer';
+  $cover.title = 'Click to edit art';
+  $cover.onclick = () => openEditArt({ kind: 'game', game });
 
   const newInfoBtn = $scrapeInfoBtn.cloneNode(true) as HTMLButtonElement;
   $scrapeInfoBtn.parentNode!.replaceChild(newInfoBtn, $scrapeInfoBtn);
@@ -848,6 +2077,66 @@ async function openGameDetail(game: GameInfo) {
     }, 3000);
   });
 
+  // Scrape Banner / Logo handlers (SteamGridDB)
+  const $bannerBtn = document.getElementById('detail-scrape-banner-btn');
+  const $logoBtn = document.getElementById('detail-scrape-logo-btn');
+  if ($bannerBtn) {
+    const newBannerBtn = $bannerBtn.cloneNode(true) as HTMLButtonElement;
+    $bannerBtn.parentNode!.replaceChild(newBannerBtn, $bannerBtn);
+    newBannerBtn.addEventListener('click', async () => {
+      newBannerBtn.disabled = true;
+      const orig = newBannerBtn.innerHTML;
+      newBannerBtn.textContent = '...';
+      try {
+        const res = await scrapeBanner(game.system, game.file);
+        if (res.ok && res.url) {
+          newBannerBtn.classList.add('success');
+          newBannerBtn.textContent = '✓ Banner';
+          $banner.src = res.url + '?t=' + Date.now();
+        } else {
+          newBannerBtn.classList.add('error');
+          newBannerBtn.textContent = '✗ ' + (res.error || 'Failed');
+        }
+      } catch {
+        newBannerBtn.classList.add('error');
+        newBannerBtn.textContent = '✗ Failed';
+      }
+      setTimeout(() => {
+        newBannerBtn.disabled = false;
+        newBannerBtn.className = 'detail-action-btn';
+        newBannerBtn.innerHTML = orig;
+      }, 3000);
+    });
+  }
+  if ($logoBtn) {
+    const newLogoBtn = $logoBtn.cloneNode(true) as HTMLButtonElement;
+    $logoBtn.parentNode!.replaceChild(newLogoBtn, $logoBtn);
+    newLogoBtn.addEventListener('click', async () => {
+      newLogoBtn.disabled = true;
+      const orig = newLogoBtn.innerHTML;
+      newLogoBtn.textContent = '...';
+      try {
+        const res = await scrapeLogo(game.system, game.file);
+        if (res.ok && res.url) {
+          newLogoBtn.classList.add('success');
+          newLogoBtn.textContent = '✓ Logo';
+          $logo.src = res.url + '?t=' + Date.now();
+        } else {
+          newLogoBtn.classList.add('error');
+          newLogoBtn.textContent = '✗ ' + (res.error || 'Failed');
+        }
+      } catch {
+        newLogoBtn.classList.add('error');
+        newLogoBtn.textContent = '✗ Failed';
+      }
+      setTimeout(() => {
+        newLogoBtn.disabled = false;
+        newLogoBtn.className = 'detail-action-btn';
+        newLogoBtn.innerHTML = orig;
+      }, 3000);
+    });
+  }
+
   // Fetch metadata
   const cleanName = game.file.replace(/\.[^.]+$/, '').replace(/ \(.*/, '').replace(/ \[.*/, '').replace(/ # .*/, '');
   const meta = await fetchMetadata(game.system, cleanName);
@@ -859,27 +2148,76 @@ async function openGameDetail(game: GameInfo) {
 
 // ── Search ──────────────────────────────────────────────────────────────
 
+/**
+ * Fuzzy match: returns a positive score if every character in `query` appears in `target`
+ * in order (not necessarily contiguous). Higher score = better match.
+ * Returns 0 if no match.
+ */
+function fuzzyScore(query: string, target: string): number {
+  if (!query) return 1;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  // Exact substring match — best score
+  const idx = t.indexOf(q);
+  if (idx >= 0) {
+    // Prefix bonus; earlier match scores higher
+    return 1000 - idx + (idx === 0 ? 500 : 0);
+  }
+  // Subsequence match
+  let ti = 0, qi = 0, score = 0, streak = 0;
+  while (ti < t.length && qi < q.length) {
+    if (t[ti] === q[qi]) {
+      streak++;
+      score += 10 + streak * 2;
+      qi++;
+    } else {
+      streak = 0;
+    }
+    ti++;
+  }
+  return qi === q.length ? score : 0;
+}
+
+function fuzzyFilterGames(games: GameInfo[], query: string): GameInfo[] {
+  if (!query.trim()) return games;
+  const scored = games
+    .map(g => ({ g, score: fuzzyScore(query, g.name) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored.map(x => x.g);
+}
+
 function handleSearch(query: string) {
   if (searchTimeout) clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(async () => {
-    if (!query.trim()) {
+  searchTimeout = setTimeout(() => {
+    const q = query.trim();
+    if (!q) {
       if ($gamesView.classList.contains('active') && currentSystem) {
-        currentGames = await fetchGames(currentSystem.id);
         renderGames(currentGames);
+        $gameCount.textContent = `${currentGames.length} games`;
       } else { renderSystems(systems); showView('systems'); }
       return;
     }
-    try {
-      const results = await fetchGames(currentSystem?.id, query);
-      currentGames = results;
-      if (!$gamesView.classList.contains('active')) {
-        $systemTitle.textContent = 'Search Results';
-        showView('games');
-      }
-      $gameCount.textContent = `${results.length} results`;
+    // If we have allGamesCache or currentGames, do local fuzzy match (fast).
+    const haystack = currentSystem && $gamesView.classList.contains('active')
+      ? currentGames
+      : allGamesCache;
+    const results = fuzzyFilterGames(haystack, q);
+
+    if (!$gamesView.classList.contains('active')) {
+      $systemTitle.textContent = `Search: "${q}"`;
+      showView('games');
+    }
+    $gameCount.textContent = `${results.length} of ${haystack.length} match`;
+    if (currentSystem && $gamesView.classList.contains('active')) {
+      // Per-system view: render filtered list but don't overwrite currentGames
       renderGames(results);
-    } catch (e) { console.error('Search failed:', e); }
-  }, 300);
+    } else {
+      // Cross-system search: render with system tag
+      $gamesGrid.innerHTML = results.map((g, i) => buildGameCardHTML(g, i, true)).join('');
+      attachGameCardEvents($gamesGrid, results);
+    }
+  }, 180);
 }
 
 // ── Settings Tabs ───────────────────────────────────────────────────────
@@ -902,6 +2240,17 @@ async function loadSettingsPage() {
     $ssUserInput.value = settings.screenscraper_user ?? '';
     $ssPassInput.value = settings.screenscraper_pass ?? '';
     $rawgKeyInput.value = settings.rawg_api_key ?? '';
+    if ($sgdbKeyInput) $sgdbKeyInput.value = settings.steamgriddb_api_key ?? '';
+    const $autoplayChk = document.getElementById('autoplay-previews-input') as HTMLInputElement | null;
+    if ($autoplayChk) $autoplayChk.checked = settings.autoplay_previews ?? false;
+    const $cloudUrl = document.getElementById('cloud-sync-url') as HTMLInputElement | null;
+    const $cloudUser = document.getElementById('cloud-sync-user') as HTMLInputElement | null;
+    const $cloudPass = document.getElementById('cloud-sync-pass') as HTMLInputElement | null;
+    const $autoBackup = document.getElementById('auto-backup-input') as HTMLInputElement | null;
+    if ($cloudUrl) $cloudUrl.value = settings.cloud_sync_url ?? '';
+    if ($cloudUser) $cloudUser.value = settings.cloud_sync_user ?? '';
+    if ($cloudPass) $cloudPass.value = settings.cloud_sync_pass ?? '';
+    if ($autoBackup) $autoBackup.checked = settings.auto_backup_saves ?? false;
   } catch { toast('Failed to load settings'); }
 
   // BIOS status
@@ -1659,7 +3008,15 @@ function executeHotkeyAction(actionId: string) {
       break;
     case 'save_state':
       // EmulatorJS exposes EJS_emulator.quickSave() in the iframe
-      try { (iframe?.contentWindow as any)?.EJS_emulator?.quickSave?.(); toast('State saved'); } catch { toast('Save not supported'); }
+      try {
+        (iframe?.contentWindow as any)?.EJS_emulator?.quickSave?.();
+        // Record metadata: snapshot canvas as screenshot
+        if (currentPlaytimeSession) {
+          const shot = captureEmulatorScreenshot(iframe);
+          recordSaveStateSlot(currentPlaytimeSession.gameId, 0, shot);
+        }
+        toast('State saved');
+      } catch { toast('Save not supported'); }
       break;
     case 'load_state':
       try { (iframe?.contentWindow as any)?.EJS_emulator?.quickLoad?.(); toast('State loaded'); } catch { toast('Load not supported'); }
@@ -2190,6 +3547,17 @@ function renderThemeGrid() {
     applyTheme('custom');
     toast('Custom theme applied!');
   });
+
+  // Autoplay previews toggle (immediate save)
+  const $autoplayChk = document.getElementById('autoplay-previews-input') as HTMLInputElement | null;
+  if ($autoplayChk) {
+    $autoplayChk.addEventListener('change', async () => {
+      if (!settings) return;
+      settings.autoplay_previews = $autoplayChk.checked;
+      try { await updateSettings(settings); toast('Autoplay setting saved'); }
+      catch { toast('Failed to save'); }
+    });
+  }
 }
 
 // renderFvThemeGrid removed - FullView now uses unified theme
@@ -2232,6 +3600,7 @@ async function enterKioskMode() {
 function exitKioskMode() {
   kioskWasActive = false;
   closeKioskDetail();
+  clearVideoPreview();
   $header.classList.remove('hidden');
   $kioskView.classList.add('hidden');
   gamepadManager.stopPolling();
@@ -2279,12 +3648,67 @@ async function loadKioskGames() {
   renderKioskGames();
 }
 
+// ── Video preview autoplay (FullView) ─────────────────────────────
+
+let previewVideoCache: Map<string, string | null> = new Map();
+let previewTimer: ReturnType<typeof setTimeout> | null = null;
+let lastPreviewGameId = '';
+
+async function fetchVideoIdForGame(game: GameInfo): Promise<string | null> {
+  const key = game.id;
+  if (previewVideoCache.has(key)) return previewVideoCache.get(key) || null;
+  try {
+    const media = await searchMedia(game.system, game.file);
+    const id = media.youtube_ids[0] || null;
+    previewVideoCache.set(key, id);
+    return id;
+  } catch {
+    previewVideoCache.set(key, null);
+    return null;
+  }
+}
+
+function clearVideoPreview() {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+  const $preview = document.getElementById('kiosk-video-preview');
+  if ($preview) {
+    $preview.classList.add('hidden');
+    $preview.innerHTML = '';
+  }
+  lastPreviewGameId = '';
+}
+
+function scheduleVideoPreview() {
+  if (!settings?.autoplay_previews) { clearVideoPreview(); return; }
+  if (previewTimer) clearTimeout(previewTimer);
+  const game = kioskGames[kioskGameIndex];
+  if (!game) { clearVideoPreview(); return; }
+  if (game.id === lastPreviewGameId) return; // already showing
+  // Hide current preview while delay runs
+  const $preview = document.getElementById('kiosk-video-preview');
+  if ($preview) { $preview.classList.add('hidden'); $preview.innerHTML = ''; }
+  previewTimer = setTimeout(async () => {
+    if (kioskGames[kioskGameIndex]?.id !== game.id) return;
+    const videoId = await fetchVideoIdForGame(game);
+    if (!videoId) return;
+    if (kioskGames[kioskGameIndex]?.id !== game.id) return;
+    const $p = document.getElementById('kiosk-video-preview');
+    if (!$p) return;
+    lastPreviewGameId = game.id;
+    $p.innerHTML = `<iframe
+      src="https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&mute=1&controls=0&loop=1&playlist=${encodeURIComponent(videoId)}&modestbranding=1&playsinline=1"
+      frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
+    $p.classList.remove('hidden');
+  }, 900);
+}
+
 function renderKioskGames() {
   if (kioskGames.length > 0) {
     $kioskGameCounter.textContent = `${kioskGameIndex + 1} / ${kioskGames.length}`;
   } else {
     $kioskGameCounter.textContent = 'No games';
   }
+  scheduleVideoPreview();
 
   $kioskGamesCarousel.innerHTML = kioskGames.map((game, i) => `
     <div class="kiosk-game-card ${i === kioskGameIndex ? 'selected' : ''}" data-idx="${i}">
@@ -2321,7 +3745,8 @@ function launchKioskGame() {
   $header.classList.remove('hidden');
   $playerTitle.textContent = game.name;
   showView('player');
-  launchGame(game, sys, 'emulator-container');
+  void beginPlaytimeSession(game);
+  void launchGameWithConfig(game, sys, 'emulator-container');
   enterFullscreen('emulator-container');
 }
 
@@ -2603,9 +4028,331 @@ function toast(msg: string, duration = 3000) {
   setTimeout(() => el.remove(), duration);
 }
 
+// ── Management tab ────────────────────────────────────────────
+
+const SAVES_BACKUP_KEY = 'retroweb-saves-backup-index';
+
+interface BackupEntry { gameId: string; timestamp: number; slotCount: number; }
+
+function loadBackupIndex(): BackupEntry[] {
+  try { return JSON.parse(localStorage.getItem(SAVES_BACKUP_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveBackupIndex(entries: BackupEntry[]) {
+  localStorage.setItem(SAVES_BACKUP_KEY, JSON.stringify(entries));
+}
+
+function rollingBackupAllSaves() {
+  const now = Date.now();
+  const sevenDays = 7 * 86400 * 1000;
+  const index = loadBackupIndex().filter(e => now - e.timestamp < sevenDays);
+  // Snapshot current save state metadata for the current game
+  if (currentPlaytimeSession) {
+    const states = loadSaveStates(currentPlaytimeSession.gameId);
+    if (states.length > 0) {
+      index.push({ gameId: currentPlaytimeSession.gameId, timestamp: now, slotCount: states.length });
+      localStorage.setItem(`retroweb-saves-backup-${currentPlaytimeSession.gameId}-${now}`, JSON.stringify(states));
+    }
+  }
+  // Trim entries older than 7 days
+  saveBackupIndex(index);
+}
+
+function wireManagementTab() {
+  const $export = document.getElementById('export-config-btn');
+  const $import = document.getElementById('import-config-btn');
+  const $importFile = document.getElementById('import-config-file') as HTMLInputElement | null;
+  const $status = document.getElementById('config-io-status');
+
+  $export?.addEventListener('click', async () => {
+    try {
+      const data = await exportConfig();
+      // Add localStorage dump
+      const ls: Record<string, string> = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)!;
+        if (k.startsWith('retroweb-')) ls[k] = localStorage.getItem(k) || '';
+      }
+      data.localstorage = ls;
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `retroweb-config-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      if ($status) $status.textContent = '✓ Exported.';
+    } catch {
+      if ($status) $status.textContent = '✗ Export failed.';
+    }
+  });
+
+  $import?.addEventListener('click', () => $importFile?.click());
+  $importFile?.addEventListener('change', async () => {
+    if (!$importFile.files?.[0]) return;
+    try {
+      const text = await $importFile.files[0].text();
+      const data = JSON.parse(text);
+      await importConfig(data);
+      // Restore localStorage
+      if (data.localstorage) {
+        Object.entries(data.localstorage).forEach(([k, v]) => localStorage.setItem(k, v as string));
+      }
+      if ($status) $status.textContent = '✓ Imported. Reloading...';
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+      if ($status) $status.textContent = `✗ Import failed: ${e}`;
+    }
+  });
+
+  // Auto backup toggle
+  const $autoBackup = document.getElementById('auto-backup-input') as HTMLInputElement | null;
+  $autoBackup?.addEventListener('change', async () => {
+    if (!settings) return;
+    settings.auto_backup_saves = $autoBackup.checked;
+    try { await updateSettings(settings); toast('Auto-backup setting saved'); }
+    catch { toast('Failed to save'); }
+  });
+
+  document.getElementById('backup-now-btn')?.addEventListener('click', () => {
+    rollingBackupAllSaves();
+    toast('Backup snapshot saved');
+  });
+
+  document.getElementById('show-backups-btn')?.addEventListener('click', () => {
+    const $list = document.getElementById('backup-list');
+    if (!$list) return;
+    const entries = loadBackupIndex().sort((a, b) => b.timestamp - a.timestamp);
+    if (entries.length === 0) {
+      $list.innerHTML = '<p class="setting-hint">No backups yet.</p>';
+      return;
+    }
+    $list.innerHTML = entries.map(e => `
+      <div class="backup-row">
+        <span>${esc(e.gameId)}</span>
+        <span>${e.slotCount} slot(s)</span>
+        <span>${formatTimeAgo(Math.floor(e.timestamp / 1000))}</span>
+      </div>
+    `).join('');
+  });
+
+  // Cloud sync
+  document.getElementById('save-cloud-sync-btn')?.addEventListener('click', async () => {
+    if (!settings) return;
+    const $url = document.getElementById('cloud-sync-url') as HTMLInputElement;
+    const $user = document.getElementById('cloud-sync-user') as HTMLInputElement;
+    const $pass = document.getElementById('cloud-sync-pass') as HTMLInputElement;
+    settings.cloud_sync_url = $url.value.trim() || undefined;
+    settings.cloud_sync_user = $user.value.trim() || undefined;
+    settings.cloud_sync_pass = $pass.value || undefined;
+    try { await updateSettings(settings); toast('Cloud sync settings saved'); }
+    catch { toast('Failed to save'); }
+  });
+
+  document.getElementById('test-cloud-sync-btn')?.addEventListener('click', async () => {
+    const $url = document.getElementById('cloud-sync-url') as HTMLInputElement;
+    const $user = document.getElementById('cloud-sync-user') as HTMLInputElement;
+    const $pass = document.getElementById('cloud-sync-pass') as HTMLInputElement;
+    const $status = document.getElementById('cloud-sync-status');
+    if (!$status) return;
+    if (!$url.value.trim()) { $status.textContent = 'Set a URL first'; return; }
+    $status.textContent = 'Testing...';
+    try {
+      const auth = $user.value && $pass.value ? 'Basic ' + btoa(`${$user.value}:${$pass.value}`) : undefined;
+      const res = await fetch($url.value, { method: 'PROPFIND', headers: auth ? { Authorization: auth, Depth: '0' } : { Depth: '0' } });
+      $status.textContent = res.ok || res.status === 207 ? '✓ Connection OK' : `✗ ${res.status}`;
+    } catch (e) {
+      $status.textContent = `✗ ${e}`;
+    }
+  });
+
+  // Version check
+  const $versionInfo = document.getElementById('version-info');
+  document.getElementById('check-update-btn')?.addEventListener('click', async () => {
+    if (!$versionInfo) return;
+    $versionInfo.textContent = 'Checking...';
+    try {
+      const v = await fetchVersion();
+      $versionInfo.innerHTML = `Current: <strong>v${v.current}</strong>${v.latest ? ` &middot; Latest: <strong>${v.latest}</strong>` : ''}${v.update_available ? ' <span style="color:var(--accent);">(update available)</span>' : ''}`;
+    } catch {
+      $versionInfo.textContent = 'Failed to check.';
+    }
+  });
+  // Initial version load
+  fetchVersion().then(v => {
+    if ($versionInfo) {
+      $versionInfo.innerHTML = `Current: <strong>v${v.current}</strong>${v.latest ? ` &middot; Latest: <strong>${v.latest}</strong>` : ''}`;
+    }
+  }).catch(() => {});
+}
+
+// ── Diagnostics tab ──────────────────────────────────────────
+
+function wireDiagnosticsTab() {
+  const $viewer = document.getElementById('log-viewer');
+  async function refresh() {
+    if (!$viewer) return;
+    try {
+      const logs = await fetchLogs();
+      $viewer.textContent = logs.length === 0
+        ? 'No logs.'
+        : logs.map(l => `[${new Date(l.timestamp * 1000).toLocaleTimeString()}] ${l.level.toUpperCase()} ${l.message}`).join('\n');
+    } catch {
+      $viewer.textContent = 'Failed to load logs.';
+    }
+  }
+  document.getElementById('refresh-logs-btn')?.addEventListener('click', refresh);
+  document.getElementById('copy-logs-btn')?.addEventListener('click', () => {
+    if (!$viewer) return;
+    navigator.clipboard?.writeText($viewer.textContent || '').then(() => toast('Logs copied'));
+  });
+  document.getElementById('clear-logs-btn')?.addEventListener('click', async () => {
+    await clearLogs();
+    refresh();
+    toast('Logs cleared');
+  });
+  // Initial render when settings page is opened (deferred)
+}
+
+// ── Plugins tab ──────────────────────────────────────────
+
+interface PluginManifest {
+  name: string;
+  version?: string;
+  enabled: boolean;
+  source?: string;
+}
+
+const PLUGINS_KEY = 'retroweb-plugins';
+
+function loadPluginManifests(): PluginManifest[] {
+  try { return JSON.parse(localStorage.getItem(PLUGINS_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function savePluginManifests(plugins: PluginManifest[]) {
+  localStorage.setItem(PLUGINS_KEY, JSON.stringify(plugins));
+}
+
+interface RetroWebPluginAPI {
+  registerScraper(name: string, fn: (game: GameInfo) => Promise<any>): void;
+  registerCommand(id: string, label: string, fn: (game: GameInfo) => void): void;
+  registerWidget(slot: string, html: string): void;
+  fetchGames(): Promise<GameInfo[]>;
+  fetchSystems(): Promise<SystemInfo[]>;
+  toast(msg: string): void;
+}
+
+const pluginScrapers = new Map<string, (game: GameInfo) => Promise<any>>();
+const pluginCommands: Array<{ id: string; label: string; fn: (g: GameInfo) => void }> = [];
+const pluginWidgets: Map<string, string[]> = new Map();
+
+function makePluginAPI(): RetroWebPluginAPI {
+  return {
+    registerScraper(name, fn) { pluginScrapers.set(name, fn); },
+    registerCommand(id, label, fn) { pluginCommands.push({ id, label, fn }); },
+    registerWidget(slot, html) {
+      const arr = pluginWidgets.get(slot) || [];
+      arr.push(html);
+      pluginWidgets.set(slot, arr);
+      const $slot = document.querySelector(`[data-plugin-slot="${slot}"]`);
+      if ($slot) $slot.insertAdjacentHTML('beforeend', html);
+    },
+    fetchGames: () => fetchGames(),
+    fetchSystems: () => fetchSystems(),
+    toast,
+  };
+}
+
+async function loadPlugin(p: PluginManifest) {
+  if (!p.enabled || !p.source) return;
+  try {
+    const blob = new Blob([p.source], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    const mod = await import(/* @vite-ignore */ url);
+    URL.revokeObjectURL(url);
+    if (mod.default?.onLoad) {
+      mod.default.onLoad(makePluginAPI());
+    }
+  } catch (e) {
+    console.error(`Plugin ${p.name} failed:`, e);
+  }
+}
+
+function renderPluginsList() {
+  const $list = document.getElementById('plugins-list');
+  if (!$list) return;
+  const plugins = loadPluginManifests();
+  if (plugins.length === 0) {
+    $list.innerHTML = '<p class="setting-hint">No plugins installed.</p>';
+    return;
+  }
+  $list.innerHTML = plugins.map((p, i) => `
+    <div class="plugin-row">
+      <label class="setting-toggle" style="flex:1;">
+        <input type="checkbox" data-plugin-idx="${i}" ${p.enabled ? 'checked' : ''} />
+        <span><strong>${esc(p.name)}</strong> ${p.version ? `<span class="setting-hint">v${esc(p.version)}</span>` : ''}</span>
+      </label>
+      <button class="action-btn sm danger" data-remove-plugin="${i}">Remove</button>
+    </div>
+  `).join('');
+
+  $list.querySelectorAll('input[type=checkbox][data-plugin-idx]').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const idx = parseInt((chk as HTMLElement).dataset.pluginIdx!, 10);
+      const list = loadPluginManifests();
+      list[idx].enabled = (chk as HTMLInputElement).checked;
+      savePluginManifests(list);
+      toast('Reload page for plugin changes to take effect.');
+    });
+  });
+  $list.querySelectorAll('[data-remove-plugin]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt((btn as HTMLElement).dataset.removePlugin!, 10);
+      const list = loadPluginManifests();
+      list.splice(idx, 1);
+      savePluginManifests(list);
+      renderPluginsList();
+    });
+  });
+}
+
+function wirePluginsTab() {
+  document.getElementById('install-plugin-btn')?.addEventListener('click', async () => {
+    const $name = document.getElementById('plugin-name-input') as HTMLInputElement;
+    const $url = document.getElementById('plugin-url-input') as HTMLInputElement;
+    const name = $name.value.trim();
+    const url = $url.value.trim();
+    if (!name || !url) { toast('Enter name and URL'); return; }
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const source = await res.text();
+      const list = loadPluginManifests();
+      list.push({ name, version: '1.0.0', enabled: true, source });
+      savePluginManifests(list);
+      $name.value = ''; $url.value = '';
+      renderPluginsList();
+      toast(`Installed ${name}. Reload to activate.`);
+    } catch (e) {
+      toast(`Install failed: ${e}`);
+    }
+  });
+  renderPluginsList();
+}
+
+async function loadAllPlugins() {
+  const plugins = loadPluginManifests();
+  for (const p of plugins) {
+    await loadPlugin(p);
+  }
+}
+
 // ── Init ────────────────────────────────────────────────────────────────
 
 async function init() {
+  initEditArtModal();
   $systemsGrid.innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
   try {
     systems = await fetchSystems();
@@ -2620,10 +4367,13 @@ async function init() {
 
   // Pre-load all games for All Games / Favourites tabs
   try { allGamesCache = await fetchGames(); } catch { /* non-critical */ }
+  // Prime playtime/collection/hidden caches concurrently
+  await Promise.all([refreshPlaytimeCaches(), refreshCollections(), refreshHiddenGames()]);
+  renderResumeBar();
 
   // ── Event listeners ──────────────────────────────────────────────────
 
-  // Main tabs (Systems / All Games / Favourites)
+  // Main tabs (Systems / All Games / Recently / Favourites / Collections)
   document.querySelectorAll('.main-tab').forEach(tab => {
     tab.addEventListener('click', () => switchMainTab((tab as HTMLElement).dataset.mainTab!));
   });
@@ -2631,9 +4381,68 @@ async function init() {
   // Sort/filter controls for All Games tab
   document.getElementById('all-games-sort')!.addEventListener('change', () => renderAllGamesTab());
   document.getElementById('all-games-system-filter')!.addEventListener('change', () => renderAllGamesTab());
+  const $showHidden = document.getElementById('show-hidden-toggle');
+  if ($showHidden) $showHidden.addEventListener('change', () => renderAllGamesTab());
+
+  // View mode toggle (Grid / List) for All Games
+  const $viewToggle = document.getElementById('all-games-view-toggle');
+  if ($viewToggle) {
+    $viewToggle.querySelectorAll<HTMLButtonElement>('.view-mode-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.viewMode === allGamesViewMode);
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.viewMode as ViewMode;
+        if (mode === allGamesViewMode) return;
+        allGamesViewMode = mode;
+        localStorage.setItem('allGamesViewMode', mode);
+        $viewToggle.querySelectorAll<HTMLButtonElement>('.view-mode-btn').forEach(b =>
+          b.classList.toggle('active', b.dataset.viewMode === mode));
+        renderAllGamesTab();
+      });
+    });
+  }
+
+  // Smart search input (All Games tab)
+  const $allGamesSearch = document.getElementById('all-games-search') as HTMLInputElement | null;
+  if ($allGamesSearch) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    $allGamesSearch.addEventListener('input', () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        allGamesSearchQuery = $allGamesSearch.value.trim();
+        renderAllGamesTab();
+      }, 180);
+    });
+  }
 
   // Sort control for Favourites tab
   document.getElementById('fav-games-sort')!.addEventListener('change', () => renderFavouritesTab());
+
+  // Recent search input
+  const $recentSearch = document.getElementById('recent-search') as HTMLInputElement | null;
+  if ($recentSearch) {
+    let recentTimer: ReturnType<typeof setTimeout> | null = null;
+    $recentSearch.addEventListener('input', () => {
+      if (recentTimer) clearTimeout(recentTimer);
+      recentTimer = setTimeout(() => {
+        recentSearchQuery = $recentSearch.value.trim();
+        renderRecentTab();
+      }, 180);
+    });
+  }
+
+  // Create collection button
+  const $createColBtn = document.getElementById('create-collection-btn');
+  if ($createColBtn) {
+    $createColBtn.addEventListener('click', async () => {
+      const $name = document.getElementById('new-collection-name') as HTMLInputElement;
+      const $icon = document.getElementById('new-collection-icon') as HTMLInputElement;
+      const name = $name.value.trim();
+      if (!name) { toast('Enter a collection name'); return; }
+      await createCollection(name, $icon.value.trim() || undefined);
+      $name.value = ''; $icon.value = '';
+      await renderCollectionsTab();
+    });
+  }
 
   // Sort control for per-system games view
   const $systemGamesSort = document.getElementById('system-games-sort') as HTMLSelectElement;
@@ -2650,6 +4459,7 @@ async function init() {
 
   $playerBackBtn.addEventListener('click', () => {
     cleanup();
+    void endPlaytimeSession();
     if (kioskWasActive) { returnToKiosk(); return; }
     if (currentDetailGame) { showView('detail'); return; }
     showView(currentSystem ? 'games' : 'systems');
@@ -2682,6 +4492,33 @@ async function init() {
   document.querySelectorAll('.settings-tab').forEach(tab => {
     tab.addEventListener('click', () => switchSettingsTab((tab as HTMLElement).dataset.tab!));
   });
+
+  // ── Management tab wiring ───────────────────────────────────────────
+  wireManagementTab();
+  wireDiagnosticsTab();
+  wirePluginsTab();
+
+  // Duplicates scanner
+  const $dupesBtn = document.getElementById('dupes-scan-btn');
+  const $dupesStatus = document.getElementById('dupes-status');
+  const $dupesResults = document.getElementById('dupes-results');
+  if ($dupesBtn && $dupesStatus && $dupesResults) {
+    $dupesBtn.addEventListener('click', async () => {
+      ($dupesBtn as HTMLButtonElement).disabled = true;
+      $dupesStatus.textContent = 'Scanning... (hashing first 64KB of each ROM)';
+      $dupesResults.innerHTML = '';
+      try {
+        const groups = await scanDuplicates();
+        $dupesStatus.textContent = `${groups.length} duplicate group${groups.length === 1 ? '' : 's'} found`;
+        $dupesResults.innerHTML = renderDuplicateGroupsHTML(groups);
+        wireDuplicateRemoveButtons($dupesResults);
+      } catch {
+        $dupesStatus.textContent = 'Scan failed';
+      } finally {
+        ($dupesBtn as HTMLButtonElement).disabled = false;
+      }
+    });
+  }
 
   $saveRomDirBtn.addEventListener('click', async () => {
     if (!settings) return;
@@ -2774,6 +4611,7 @@ async function init() {
     settings.screenscraper_user = $ssUserInput.value.trim() || undefined;
     settings.screenscraper_pass = $ssPassInput.value.trim() || undefined;
     settings.rawg_api_key = $rawgKeyInput.value.trim() || undefined;
+    if ($sgdbKeyInput) settings.steamgriddb_api_key = $sgdbKeyInput.value.trim() || undefined;
     try {
       await updateSettings(settings);
       $infoSettingsStatus.textContent = 'Saved.';
@@ -2819,6 +4657,10 @@ async function init() {
       const tabName = (tab as HTMLElement).dataset.detailTab!;
       document.querySelectorAll('.detail-tab').forEach(t => t.classList.toggle('active', (t as HTMLElement).dataset.detailTab === tabName));
       document.querySelectorAll('.detail-tab-content').forEach(c => c.classList.toggle('active', c.id === `detail-tab-${tabName}`));
+      if (currentDetailGame) {
+        if (tabName === 'launch') renderLaunchConfigTab(currentDetailGame);
+        else if (tabName === 'saves') renderSaveStatesTab(currentDetailGame);
+      }
     });
   });
 
@@ -2875,3 +4717,4 @@ async function init() {
 }
 
 init();
+loadAllPlugins();

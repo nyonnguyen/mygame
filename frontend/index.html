@@ -43,11 +43,24 @@
     <main id="main-content">
       <!-- Systems view -->
       <div id="systems-view" class="view active">
+        <!-- Resume bar (Continue last game) -->
+        <div id="resume-bar" class="resume-bar hidden">
+          <div class="resume-bar-cover" id="resume-bar-cover"></div>
+          <div class="resume-bar-info">
+            <div class="resume-bar-eyebrow">Continue Playing</div>
+            <div class="resume-bar-title" id="resume-bar-title"></div>
+            <div class="resume-bar-meta" id="resume-bar-meta"></div>
+          </div>
+          <button id="resume-bar-play" class="resume-bar-btn">&#9654; Resume</button>
+        </div>
+
         <!-- Main navigation tabs -->
         <div class="main-tabs">
           <button class="main-tab active" data-main-tab="systems">Systems</button>
           <button class="main-tab" data-main-tab="all-games">All Games</button>
+          <button class="main-tab" data-main-tab="recent">Recently Played</button>
           <button class="main-tab" data-main-tab="favourites">Favourites</button>
+          <button class="main-tab" data-main-tab="collections">Collections</button>
         </div>
 
         <!-- Systems tab content -->
@@ -60,14 +73,25 @@
           <div class="games-toolbar">
             <span id="all-games-count" class="game-count"></span>
             <div class="toolbar-controls">
+              <input type="text" id="all-games-search" class="setting-input" placeholder="Smart search..." style="max-width:240px;" />
               <select id="all-games-sort" class="setting-input compact-select">
                 <option value="name-asc">Name A-Z</option>
                 <option value="name-desc">Name Z-A</option>
                 <option value="system">By System</option>
+                <option value="playtime">Most Played</option>
+                <option value="last-played">Last Played</option>
               </select>
               <select id="all-games-system-filter" class="setting-input compact-select">
                 <option value="">All Systems</option>
               </select>
+              <label class="setting-toggle" style="font-size:0.78rem;">
+                <input type="checkbox" id="show-hidden-toggle" />
+                <span>Show hidden</span>
+              </label>
+              <div class="view-mode-toggle" id="all-games-view-toggle" role="group" aria-label="View mode">
+                <button class="view-mode-btn active" data-view-mode="grid" title="Grid view">&#9638;</button>
+                <button class="view-mode-btn" data-view-mode="list" title="List view">&#9776;</button>
+              </div>
             </div>
           </div>
           <div id="all-games-grid" class="games-grid"></div>
@@ -93,6 +117,40 @@
             <p class="setting-hint">Click the heart on any game to add it here.</p>
           </div>
         </div>
+
+        <!-- Recently Played tab content -->
+        <div id="main-tab-recent" class="main-tab-content">
+          <div class="games-toolbar">
+            <span id="recent-games-count" class="game-count"></span>
+            <div class="toolbar-controls">
+              <input type="text" id="recent-search" class="setting-input" placeholder="Search recent..." style="max-width:240px;" />
+            </div>
+          </div>
+          <div id="recent-games-grid" class="games-grid"></div>
+          <div id="recent-empty" class="empty-state hidden">
+            <div class="empty-icon">&#9202;</div>
+            <p>No recently played games.</p>
+            <p class="setting-hint">Play some games — they will appear here.</p>
+          </div>
+        </div>
+
+        <!-- Collections tab content -->
+        <div id="main-tab-collections" class="main-tab-content">
+          <div class="games-toolbar">
+            <span id="collections-count" class="game-count"></span>
+            <div class="toolbar-controls">
+              <input type="text" id="new-collection-name" class="setting-input" placeholder="New collection name..." style="max-width:240px;" />
+              <input type="text" id="new-collection-icon" class="setting-input" placeholder="Icon (emoji)" style="max-width:90px;" />
+              <button id="create-collection-btn" class="action-btn sm">+ Create</button>
+            </div>
+          </div>
+          <div id="collections-list" class="collections-list"></div>
+          <div id="collections-empty" class="empty-state hidden">
+            <div class="empty-icon">&#128193;</div>
+            <p>No collections yet.</p>
+            <p class="setting-hint">Create a collection to group games (JRPG, Co-op, etc.).</p>
+          </div>
+        </div>
       </div>
 
       <!-- Games view (per-system) -->
@@ -115,6 +173,8 @@
       <div id="detail-view" class="view">
         <div id="detail-backdrop" class="detail-backdrop">
           <img id="detail-backdrop-img" class="detail-backdrop-img" alt="" />
+          <img id="detail-hero-banner" class="detail-hero-banner" alt="" />
+          <img id="detail-hero-logo" class="detail-hero-logo" alt="" />
           <div class="detail-backdrop-gradient"></div>
         </div>
         <div class="detail-header">
@@ -128,8 +188,11 @@
               <div class="detail-actions">
                 <button class="detail-play-btn" id="detail-play-btn">&#9654; Play</button>
                 <button class="detail-action-btn" id="detail-scrape-art-btn" title="Download box art">&#128247; Art</button>
+                <button class="detail-action-btn" id="detail-edit-art-btn" title="Upload or search custom art">&#9999;&#65039; Edit Art</button>
                 <button class="detail-action-btn" id="detail-scrape-info-btn" title="Download game info">&#128269; Info</button>
                 <button class="detail-action-btn" id="detail-search-media-btn" title="Search YouTube gameplay &amp; screenshots">&#127916; Media</button>
+                <button class="detail-action-btn" id="detail-scrape-banner-btn" title="Download hero banner from SteamGridDB">&#127942; Banner</button>
+                <button class="detail-action-btn" id="detail-scrape-logo-btn" title="Download transparent logo from SteamGridDB">&#10024; Logo</button>
               </div>
               <div class="detail-meta" id="detail-meta">
                 <div class="detail-meta-loading">Loading metadata...</div>
@@ -140,6 +203,8 @@
             <button class="detail-tab active" data-detail-tab="overview">Overview</button>
             <button class="detail-tab" data-detail-tab="gameplay">Gameplay</button>
             <button class="detail-tab" data-detail-tab="screenshots">Screenshots</button>
+            <button class="detail-tab" data-detail-tab="saves">Save States</button>
+            <button class="detail-tab" data-detail-tab="launch">Launch Config</button>
           </div>
           <div id="detail-tab-overview" class="detail-tab-content active">
             <div id="detail-description" class="detail-description"></div>
@@ -150,6 +215,12 @@
           </div>
           <div id="detail-tab-screenshots" class="detail-tab-content">
             <div id="detail-screenshots" class="detail-screenshots"></div>
+          </div>
+          <div id="detail-tab-saves" class="detail-tab-content">
+            <div id="detail-saves" class="detail-saves"></div>
+          </div>
+          <div id="detail-tab-launch" class="detail-tab-content">
+            <div id="detail-launch" class="detail-launch"></div>
           </div>
         </div>
         <div id="detail-scrape-status" class="detail-scrape-status hidden"></div>
@@ -188,10 +259,23 @@
             <button class="settings-tab" data-tab="bios">BIOS</button>
             <button class="settings-tab" data-tab="hotkeys">Hotkeys</button>
             <button class="settings-tab" data-tab="controller">Controller</button>
+            <button class="settings-tab" data-tab="management">Management</button>
+            <button class="settings-tab" data-tab="diagnostics">Diagnostics</button>
+            <button class="settings-tab" data-tab="plugins">Plugins</button>
           </div>
 
           <!-- Appearance Tab -->
           <div id="tab-appearance" class="settings-tab-content active">
+            <section class="settings-section">
+              <h3>FullView Preview</h3>
+              <div class="setting-row">
+                <label class="setting-toggle">
+                  <input type="checkbox" id="autoplay-previews-input" />
+                  <span>Autoplay video previews on focus</span>
+                </label>
+              </div>
+              <p class="setting-hint">When enabled, hovering on a game in FullView mode autoplays gameplay video preview after ~900ms.</p>
+            </section>
             <section class="settings-section">
               <h3>Console Theme</h3>
               <p class="setting-hint">Choose a console-inspired theme. Each theme matches the look and feel of that console's launcher.</p>
@@ -291,6 +375,15 @@
               </div>
             </section>
             <section class="settings-section">
+              <h3>Duplicate Detection</h3>
+              <p class="setting-hint">Scan ROM files for content duplicates (same hash). Useful for cleaning up multi-region copies.</p>
+              <div class="setting-row">
+                <button id="dupes-scan-btn" class="action-btn">Scan for Duplicates</button>
+                <span id="dupes-status" class="setting-hint" style="margin:0;"></span>
+              </div>
+              <div id="dupes-results" class="dupes-results"></div>
+            </section>
+            <section class="settings-section">
               <h3>Game Info Scraper</h3>
               <p class="setting-hint">Downloads game descriptions, publisher, developer, year, genre from online databases.<br>
                 <strong>Primary:</strong> ScreenScraper.fr (best for retro games) &rarr; <strong>Fallback:</strong> RAWG.io (broader database)</p>
@@ -315,6 +408,13 @@
                   <input type="text" id="rawg-key-input" class="setting-input" placeholder="API Key" style="max-width:400px;" autocomplete="off" />
                 </div>
                 <p class="setting-hint">Free key at <a href="https://rawg.io/apidocs" target="_blank" style="color:var(--accent);">rawg.io/apidocs</a>. Used as fallback when ScreenScraper misses.</p>
+              </div>
+              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">SteamGridDB API Key (banner + logo):</label>
+                <div class="setting-row">
+                  <input type="text" id="sgdb-key-input" class="setting-input" placeholder="API Key" style="max-width:400px;" autocomplete="off" />
+                </div>
+                <p class="setting-hint">Free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" style="color:var(--accent);">steamgriddb.com</a>. Used for hero banners and transparent logos.</p>
               </div>
               <div class="setting-row" style="margin-top:8px;">
                 <button id="save-info-settings-btn" class="action-btn">Save Info Settings</button>
@@ -408,12 +508,113 @@
               </div>
             </div>
           </div>
+
+          <!-- Management Tab -->
+          <div id="tab-management" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>Import / Export Configuration</h3>
+              <p class="setting-hint">Backup all settings, collections, playtime, hidden games, and per-game configs.</p>
+              <div class="setting-row">
+                <button id="export-config-btn" class="action-btn">Export Config (JSON)</button>
+                <button id="import-config-btn" class="action-btn">Import Config...</button>
+                <input type="file" id="import-config-file" accept="application/json" style="display:none;" />
+              </div>
+              <p id="config-io-status" class="setting-hint"></p>
+            </section>
+            <section class="settings-section">
+              <h3>Auto Backup Saves</h3>
+              <div class="setting-row">
+                <label class="setting-toggle">
+                  <input type="checkbox" id="auto-backup-input" />
+                  <span>Auto-backup save states on game exit</span>
+                </label>
+              </div>
+              <p class="setting-hint">Stores rolling 7-day snapshots of save state metadata in browser localStorage.</p>
+              <div class="setting-row">
+                <button id="backup-now-btn" class="action-btn sm">Backup Now</button>
+                <button id="show-backups-btn" class="action-btn sm">Show Backups</button>
+              </div>
+              <div id="backup-list" class="backup-list"></div>
+            </section>
+            <section class="settings-section">
+              <h3>Cloud Save Sync (WebDAV)</h3>
+              <p class="setting-hint">Optional WebDAV-based save sync. Save state metadata pushed on game exit, pulled on launch.</p>
+              <div class="setting-row">
+                <label class="mapping-toolbar-label" style="min-width:90px;">URL:</label>
+                <input type="text" id="cloud-sync-url" class="setting-input" placeholder="https://webdav.example.com/retroweb/" style="max-width:400px;" autocomplete="off" />
+              </div>
+              <div class="setting-row">
+                <label class="mapping-toolbar-label" style="min-width:90px;">Username:</label>
+                <input type="text" id="cloud-sync-user" class="setting-input" placeholder="Username" style="max-width:240px;" autocomplete="off" />
+                <label class="mapping-toolbar-label">Password:</label>
+                <input type="password" id="cloud-sync-pass" class="setting-input" placeholder="Password" style="max-width:240px;" autocomplete="off" />
+              </div>
+              <div class="setting-row">
+                <button id="save-cloud-sync-btn" class="action-btn">Save Cloud Settings</button>
+                <button id="test-cloud-sync-btn" class="action-btn sm">Test Connection</button>
+                <span id="cloud-sync-status" class="setting-hint" style="margin:0;"></span>
+              </div>
+            </section>
+            <section class="settings-section">
+              <h3>Version</h3>
+              <div id="version-info" class="setting-hint"></div>
+              <div class="setting-row">
+                <button id="check-update-btn" class="action-btn sm">Check for Updates</button>
+              </div>
+            </section>
+          </div>
+
+          <!-- Diagnostics Tab -->
+          <div id="tab-diagnostics" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>Logs</h3>
+              <div class="setting-row">
+                <button id="refresh-logs-btn" class="action-btn sm">Refresh</button>
+                <button id="copy-logs-btn" class="action-btn sm">Copy</button>
+                <button id="clear-logs-btn" class="action-btn sm danger">Clear</button>
+              </div>
+              <pre id="log-viewer" class="log-viewer"></pre>
+            </section>
+          </div>
+
+          <!-- Plugins Tab -->
+          <div id="tab-plugins" class="settings-tab-content">
+            <section class="settings-section">
+              <h3>Plugins</h3>
+              <p class="setting-hint">JavaScript plugins extend RetroWeb. Drop <code>.js</code> files in <code>~/.retroweb/plugins/</code> or paste an inline plugin below.</p>
+              <div id="plugins-list" class="plugins-list"></div>
+              <div class="setting-row" style="margin-top:12px;">
+                <input type="text" id="plugin-name-input" class="setting-input" placeholder="Plugin name" style="max-width:200px;" />
+                <button id="install-plugin-btn" class="action-btn sm">Install from URL</button>
+                <input type="text" id="plugin-url-input" class="setting-input" placeholder="https://..." style="max-width:300px;" />
+              </div>
+              <details style="margin-top:12px;">
+                <summary class="setting-hint" style="cursor:pointer;">Plugin API reference</summary>
+                <pre class="log-viewer" style="margin-top:8px;">
+// Plugins are loaded as ES modules. They receive a `retroweb` API object.
+export default {
+  name: 'my-plugin',
+  version: '1.0.0',
+  onLoad(api) {
+    // api.registerScraper(name, fn) - add a custom scraper
+    // api.registerCommand(id, label, fn) - add to game card context menu
+    // api.registerWidget(slot, html) - inject HTML into a slot (header, sidebar)
+    // api.fetchGames(), api.fetchSystems() - read library
+    // api.toast(msg) - show notification
+    console.log('Loaded my-plugin');
+  },
+};
+                </pre>
+              </details>
+            </section>
+          </div>
         </div>
       </div>
 
       <!-- Kiosk mode overlay -->
       <div id="kiosk-view" class="kiosk-view hidden">
         <div class="kiosk-bg"></div>
+        <div id="kiosk-video-preview" class="kiosk-video-preview hidden"></div>
         <div class="kiosk-header">
           <h1 class="kiosk-title">RetroWeb</h1>
           <div id="kiosk-clock" class="kiosk-clock"></div>
@@ -520,6 +721,57 @@
           <div id="browse-dirs-list" class="browse-dirs-list"></div>
           <div class="browse-footer">
             <button id="browse-select-btn" class="action-btn">Select This Folder</button>
+          </div>
+        </div>
+      </div>
+      <!-- Edit Art Modal (game art + system art) -->
+      <div id="edit-art-modal" class="modal hidden">
+        <div class="modal-content edit-art-modal-content">
+          <div class="modal-header">
+            <h2 id="edit-art-title">Edit Art</h2>
+            <button id="edit-art-close-btn" class="close-btn">&times;</button>
+          </div>
+          <div class="edit-art-current">
+            <div class="edit-art-current-label">Current</div>
+            <div class="edit-art-current-preview" id="edit-art-current-preview">
+              <div class="placeholder">&#127918;</div>
+            </div>
+          </div>
+          <div class="edit-art-tabs">
+            <button class="edit-art-tab active" data-edit-art-tab="search">&#128269; Search</button>
+            <button class="edit-art-tab" data-edit-art-tab="upload">&#128228; Upload</button>
+            <button class="edit-art-tab" data-edit-art-tab="url">&#128279; URL</button>
+            <button class="edit-art-tab" data-edit-art-tab="reset" id="edit-art-tab-reset">&#9851; Reset</button>
+          </div>
+          <div id="edit-art-tab-search" class="edit-art-tab-content active">
+            <div class="edit-art-search-bar">
+              <input type="text" id="edit-art-search-input" class="setting-input" placeholder="Search images..." />
+              <button id="edit-art-search-btn" class="action-btn sm">Search</button>
+              <a id="edit-art-google-link" class="edit-art-google-link" href="#" target="_blank" rel="noopener">Open Google</a>
+            </div>
+            <div id="edit-art-search-status" class="edit-art-status"></div>
+            <div id="edit-art-search-results" class="edit-art-search-results"></div>
+          </div>
+          <div id="edit-art-tab-upload" class="edit-art-tab-content">
+            <div id="edit-art-drop" class="edit-art-drop">
+              <div class="edit-art-drop-icon">&#128228;</div>
+              <div class="edit-art-drop-text">Drop an image here or click to browse</div>
+              <input type="file" id="edit-art-file" accept="image/*" style="display:none;" />
+            </div>
+            <div id="edit-art-upload-status" class="edit-art-status"></div>
+          </div>
+          <div id="edit-art-tab-url" class="edit-art-tab-content">
+            <div class="edit-art-url-bar">
+              <input type="text" id="edit-art-url-input" class="setting-input" placeholder="Paste image URL (https://...)" />
+              <button id="edit-art-url-btn" class="action-btn sm">Apply</button>
+            </div>
+            <div class="setting-hint">Right-click any image online &rarr; "Copy image address" &rarr; paste here.</div>
+            <div id="edit-art-url-status" class="edit-art-status"></div>
+          </div>
+          <div id="edit-art-tab-reset" class="edit-art-tab-content">
+            <p class="setting-hint" id="edit-art-reset-hint">Remove the custom system art override and revert to the auto-picked cover.</p>
+            <button id="edit-art-reset-btn" class="action-btn danger">Remove Custom Art</button>
+            <div id="edit-art-reset-status" class="edit-art-status"></div>
           </div>
         </div>
       </div>
