@@ -1,6 +1,6 @@
 # RetroWeb - Project Document
 
-> Last updated: 2026-05-28
+> Last updated: 2026-05-30
 
 RetroWeb is a self-hosted retro game launcher and emulator. It runs as a local web server (Rust/Axum backend + TypeScript/Vite frontend) and plays games in the browser via EmulatorJS.
 
@@ -163,10 +163,16 @@ Downloads box art from a libretro-thumbnails compatible server.
 
 ### Configuration (Settings > ROMs > Thumbnail Scraper)
 
+Layout is grouped into **Sources**, **Known servers**, **Options**, and a **Scrape Thumbnails** subsection (divider + system selector + run buttons + progress panel).
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Source URL | `https://thumbnails.libretro.com` | Base URL of thumbnail server |
 | Delay | 100 ms | Pause between HTTP requests (rate limiting) |
+
+### Progress Log
+
+Each progress panel (Scan, Thumbnail Scrape, Info Scrape) shows the title, count, and a thin progress bar. The verbose per-item log is collapsed by default; click **Show log / Hide log** in the panel header to toggle it.
 
 ### How It Works
 
@@ -490,13 +496,90 @@ FullView shows a detail overlay for the currently selected game or platform with
 
 Metadata is fetched lazily from `/api/metadata/:system/:file` when the overlay opens. If no metadata has been scraped yet, the overlay shows the basic file/system info and prompts the user to scrape from the main view.
 
+### Touch Controls (Mobile + Mouse)
+
+The FullView footer renders a row of clickable buttons so the launcher is usable without a keyboard or controller — useful on mobile, touchscreens, or when navigating with a mouse.
+
+| Button | Action |
+|---|---|
+| &#9650; System | Previous system |
+| &#9660; System | Next system |
+| &#9664; Game | Previous game |
+| &#9432; Info | Open game detail overlay |
+| &#9654; Play | Launch the selected game |
+| &#8862; Platform | Open platform detail overlay |
+| &#9654; Game | Next game |
+| &#10005; Exit | Leave FullView mode |
+
+On screens narrower than 720px the text labels collapse to icons only. The original keyboard/controller hint strip is hidden on small screens to save space; on desktop both rows render together so users can see which physical button maps to which on-screen action.
+
 ### Auto Fullscreen on Launch
 
-When a game is launched from FullView (via A, Enter/Space, or clicking a card), the player iframe automatically requests browser fullscreen. This gives a console-like, distraction-free experience on TV/arcade setups. If the browser denies the request (no user activation), the game still launches normally in the embedded player and fullscreen can be entered manually via the header button or Select+Y hotkey.
+When a game is launched from FullView (via A, Enter/Space, or clicking a card), the player container automatically requests browser fullscreen. This gives a console-like, distraction-free experience on TV/arcade setups. The container — not the iframe — is the fullscreen target so the [Floating Player Controls](#floating-player-controls-mobile) stay reachable while the game is running. If the browser denies the request (no user activation), the game still launches normally in the embedded player and fullscreen can be entered manually via the header button or Select+Y hotkey.
+
+**iOS fallback.** Safari and Chrome on iPhone (both WebKit) don't expose the Fullscreen API on non-`<video>` elements, so `requestFullscreen()` is unavailable. The fullscreen action falls back to a CSS pseudo-fullscreen (`position: fixed; inset: 0; height: 100dvh`) toggled via a `.pseudo-fullscreen` class on the container. Tapping the fullscreen button again exits the mode. The floating Exit (&#10005;) button also remains visible so the user can quit the game directly. For a true edge-to-edge experience on iPhone, install RetroWeb as a PWA (see [PWA / Install as App](#pwa--install-as-app)) — when launched from the home screen, the browser chrome is gone and the pseudo-fullscreen effectively fills the entire screen.
+
+### Floating Player Controls (Mobile)
+
+Two small floating buttons live in the top-right corner of the emulator container during gameplay:
+
+| Button | Action |
+|---|---|
+| &#10005; | Exit the game (same as the header Back button) |
+| &#9974; | Toggle fullscreen |
+
+On hover-capable devices (desktop) the controls fade in when the cursor enters the player area. On touch devices (`@media (hover: none)`) they stay visible at all times so users on phones can always exit a game without needing a physical keyboard, controller, or browser chrome.
+
+**Implementation note.** Because the iframe holding EmulatorJS is appended into `#emulator-container` at launch time, naive `container.innerHTML = ''` would also destroy the floating-controls overlay and leave mobile users stranded in fullscreen. `launchGame()` therefore uses a `clearContainerKeepControls()` helper that removes every child *except* `.player-floating-controls`, so the exit (&#10005;) and fullscreen (&#9974;) buttons survive across game launches.
+
+**Positioning.** The overlay uses `position: fixed` (not `absolute` inside the container) with `top: env(safe-area-inset-top) + 12px` and `right: env(safe-area-inset-right) + 12px`, plus `z-index: 10000`. This avoids two pitfalls observed in testing:
+
+- On iOS Safari, an `<iframe>` can be promoted into its own compositing layer that sits above absolute-positioned siblings inside the same stacking context, hiding the X. `position: fixed` lifts the overlay out of that container's stacking context entirely.
+- On iPhone (especially when launched as a PWA), `top: 10px` would sit under the notch / status bar. `env(safe-area-inset-top)` pushes the overlay below it.
+
+The exit button (`#pf-back-btn`) is tinted red and uses a 48&nbsp;px touch target with a heavy backdrop blur so it remains obvious against bright game graphics. The global header is hidden whenever the player view is active (`#header.hidden`), giving the game the full viewport and eliminating any chance of overlap with the always-on overlay.
+
+### Mobile Audio on iOS (Known Limitation)
+
+iOS Safari and Chrome (both WebKit) refuse to start Web Audio until a user gesture fires **inside the iframe** that owns the AudioContext. EmulatorJS auto-starts the game when the ROM finishes loading, before any in-iframe gesture, so on iPhone/iPad the AudioContext stays `suspended` and the game plays muted.
+
+Both Proxy-wrapping and `class extends` of `window.AudioContext` to retrofit a gesture-based unlock have been tried and both produced regressions on real iPhone/iPad Chrome (loading hang in one case, post-load frame-freeze in the other) while passing on desktop Chrome and Chromium mobile emulation. The unlock code has been removed for now; audio on iPhone/iPad is silent by design until a different approach is validated against real WebKit.
 
 ### Return to FullView
 
 After exiting a game (via Back button, Escape key, or hotkey combo), the user returns to FullView mode at the same system/game position (not reset to beginning). Exiting fullscreen via the browser's Escape automatically ends fullscreen but keeps the game running until the user explicitly exits it.
+
+### PWA / Install as App
+
+RetroWeb is shipped as an installable Progressive Web App. The motivation is iPhone fullscreen — Safari/Chrome on iPhone don't support the Fullscreen API for arbitrary elements, but a PWA launched from the home screen runs **without browser chrome**, giving an effectively fullscreen, app-like experience that complements the CSS pseudo-fullscreen fallback.
+
+**Assets** (all in `frontend/public/`, served from the dist root):
+
+| File | Purpose |
+|---|---|
+| `manifest.webmanifest` | Web App Manifest: name, icons, `display: standalone`, theme color |
+| `icon.svg` / `icon-192.png` / `icon-512.png` | Standard app icons |
+| `icon-maskable-512.png` | Android adaptive icon (safe-zone padded) |
+| `apple-touch-icon.png` (180×180) | iOS home-screen icon |
+
+**Meta tags in `index.html`** that make PWA work, especially on iOS:
+
+- `<meta name="apple-mobile-web-app-capable" content="yes">` — the actual switch that hides Safari's chrome when launched from home screen
+- `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">` — full-bleed status bar styling
+- `<meta name="viewport" ... viewport-fit=cover>` — allows content under the notch/safe areas (combine with `env(safe-area-inset-*)` in CSS)
+- `<link rel="manifest" href="/manifest.webmanifest">` — Chromium discovers the manifest
+
+**Install UX:**
+
+- **iPhone / iPad:** must use Safari (Chrome/Firefox/Edge on iOS are all Safari under the hood, but only Safari's Share menu exposes "Add to Home Screen"). Once installed, opening RetroWeb from the home-screen icon runs without URL bar.
+- **Android Chrome / Edge / Samsung Internet:** the browser fires `beforeinstallprompt`. RetroWeb captures it and surfaces a dismissible install banner plus a Settings → Appearance → "Install RetroWeb" button. (Note: full installability on Android requires a service worker with a `fetch` handler; RetroWeb currently ships without one, so the install banner there appears only if the browser allows install without SW. Adding a minimal passthrough SW is a future enhancement.)
+- **Desktop Chrome / Edge:** address-bar install icon, plus the same in-app Install button when supported.
+
+**Per-platform in-app help.** Settings → Appearance → "Install as App" expands to show step-by-step instructions for iPhone, Android, and Desktop. A dismissible banner at the bottom of the page shows on first eligible visit (iOS Safari, or any browser firing `beforeinstallprompt`) and remembers dismissal for 14 days via `localStorage` (`pwa-banner-dismissed`).
+
+**Standalone detection.** `window.matchMedia('(display-mode: standalone)').matches` and the iOS-only `navigator.standalone` flag are used to suppress install prompts when already running as an installed app.
+
+**HTTPS.** PWA install (beyond `localhost`) requires HTTPS. The local dev server (`localhost:5173`) and the Rust server on `localhost:3999` both qualify under the localhost exemption. For LAN testing on a phone, use a reverse-proxy with TLS (Caddy, `mkcert` + nginx) or a tunnel like `cloudflared`/`ngrok` — pointing the phone at `http://192.168.x.x:3999` will NOT allow install on iOS Safari.
 
 ---
 
@@ -678,6 +761,7 @@ Stored in `~/.retroweb/settings.json`:
 | GET | `/api/hidden-games` | List hidden game IDs |
 | POST | `/api/hidden-games` | Replace hidden set; body is `string[]` |
 | POST | `/api/duplicates/scan` | Scan for content-duplicate ROMs |
+| POST | `/api/duplicates/delete` | Delete a duplicate ROM (and sidecar art) to reclaim storage; body `{game_id}` |
 | GET | `/api/banner/{system}/{file}` | Serve cached hero banner |
 | GET | `/api/logo/{system}/{file}` | Serve cached transparent logo |
 | POST | `/api/scrape-banner/{system}/{file}` | Fetch hero banner from SteamGridDB |
@@ -1103,9 +1187,17 @@ Most ROM headers (NES, SNES, GB, etc.) live in the first few KB. Two same-sized 
 
 ### UI
 
-The result panel lists each group with a **Hide** button per duplicate row, which adds that ID to the hidden games set.
+The result panel lists each group with two actions per duplicate row:
 
-Endpoint: `POST /api/duplicates/scan`.
+- **Hide** — adds that ID to the hidden games set (keeps the file on disk).
+- **Delete** — permanently removes the ROM file (and any sidecar artwork with the same stem under `<system>/images/`) from disk. Use this to reclaim storage. The status bar tracks total bytes reclaimed across deletions, and groups with fewer than 2 copies remaining are removed automatically.
+
+The Delete button prompts a confirmation dialog before removing the file; the operation cannot be undone.
+
+Endpoints:
+
+- `POST /api/duplicates/scan` — scan for duplicate groups.
+- `POST /api/duplicates/delete` — body `{ "game_id": "<system>:<file>" }`. Validates the resolved path stays inside the ROM directory, removes the ROM and sidecar art, refreshes the library, and returns `{ ok, bytes_freed }`.
 
 ---
 
@@ -1274,6 +1366,19 @@ Endpoint: `GET /api/version` → `{ current, latest, update_available }`.
 ---
 
 ## Changelog
+
+### 2026-05-29 — iPhone Fullscreen Fix + PWA Install
+
+- **Fixed**: Fullscreen button did nothing on Chrome / Safari on iPhone. Both browsers use WebKit and don't expose `requestFullscreen()` on non-`<video>` elements. `enterFullscreen()` now falls back to a CSS pseudo-fullscreen (`position: fixed; inset: 0; height: 100dvh`) toggled via a `.pseudo-fullscreen` class on `#emulator-container`. Tapping the button again exits. See [Auto Fullscreen on Launch / iOS fallback](#auto-fullscreen-on-launch).
+- **Added**: PWA / Installable App support — `manifest.webmanifest`, generated icons (192/512/maskable), `apple-touch-icon`, and the iOS-specific meta tags (`apple-mobile-web-app-capable`, status bar style, `viewport-fit=cover`). Installing as a PWA on iPhone removes the browser chrome and gives a true edge-to-edge app experience that complements the pseudo-fullscreen. See [PWA / Install as App](#pwa--install-as-app).
+- **Added**: Per-platform install instructions in Settings → Appearance → "Install as App", plus a dismissible install banner on first eligible visit (iOS Safari users, or Chromium browsers that fire `beforeinstallprompt`). Dismissal is remembered for 14 days in `localStorage` (`pwa-banner-dismissed`).
+
+### 2026-05-28 — Mobile-Friendly FullView & Player Controls
+
+- **Added**: FullView touch button row (▲▼ system, ◀▶ game, Play, Info, Platform, Exit) so the launcher is usable on mobile, touchscreens, and with a mouse. Labels collapse to icons on screens narrower than 720px. See [Touch Controls (Mobile + Mouse)](#touch-controls-mobile--mouse).
+- **Added**: Floating in-player controls (Exit + Fullscreen) overlaid in the top-right of the emulator. Always visible on touch devices; fade in on hover for desktop. See [Floating Player Controls (Mobile)](#floating-player-controls-mobile).
+- **Changed**: `enterFullscreen` now targets `#emulator-container` rather than the iframe, keeping the floating controls reachable during fullscreen gameplay.
+- **Changed**: FullView no longer hides the OS mouse cursor (`cursor: none` removed) so desktop users can click the new touch buttons.
 
 ### 2026-05-28 — Custom Art Editor
 

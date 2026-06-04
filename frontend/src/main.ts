@@ -5,7 +5,7 @@ import {
   listCollections, createCollection, updateCollection, deleteCollection,
   collectionAddGame, collectionRemoveGame,
   fetchGameConfig, saveGameConfig, fetchAlternateCores,
-  fetchHiddenGames, saveHiddenGames, scanDuplicates,
+  fetchHiddenGames, saveHiddenGames, scanDuplicates, deleteDuplicate,
   fetchVersion, fetchLogs, clearLogs, exportConfig, importConfig,
   bannerUrl, logoUrl, scrapeBanner, scrapeLogo,
   searchImages, uploadArt, applyArtUrl,
@@ -483,6 +483,15 @@ function showView(view: ViewName) {
   $detailView.classList.toggle('active', view === 'detail');
   $playerView.classList.toggle('active', view === 'player');
   $settingsView.classList.toggle('active', view === 'settings');
+  // Hide the global header during gameplay so the player can use the full
+  // viewport and the floating Exit/Fullscreen overlay has nothing to clash
+  // with in the top-right corner.
+  if (view === 'player') {
+    $header.classList.add('hidden');
+  } else if (!kioskWasActive) {
+    $header.classList.remove('hidden');
+  }
+  document.body.classList.toggle('playing', view === 'player');
   if (view !== 'player') { cleanup(); stopHotkeyPolling(); }
   if (view === 'player') startHotkeyPolling();
   // End playtime session when leaving player view
@@ -656,10 +665,13 @@ function renderDuplicateGroupsHTML(groups: DuplicateGroup[]): string {
       </div>
       <div class="dupe-games">
         ${g.games.map(game => `
-          <div class="dupe-row">
+          <div class="dupe-row" data-id="${esc(game.id)}" data-size="${g.size}">
             <span class="dupe-system">${esc(game.system)}</span>
             <span class="dupe-file" title="${esc(game.file)}">${esc(game.name)}</span>
-            <button class="action-btn sm dupe-hide-btn" data-id="${esc(game.id)}">Hide</button>
+            <span class="dupe-actions">
+              <button class="action-btn sm dupe-hide-btn" data-id="${esc(game.id)}">Hide</button>
+              <button class="action-btn sm danger dupe-delete-btn" data-id="${esc(game.id)}" data-size="${g.size}" data-name="${esc(game.name)}" data-file="${esc(game.file)}">Delete</button>
+            </span>
           </div>
         `).join('')}
       </div>
@@ -667,7 +679,17 @@ function renderDuplicateGroupsHTML(groups: DuplicateGroup[]): string {
   `).join('');
 }
 
-function wireDuplicateRemoveButtons(container: HTMLElement) {
+// Cumulative bytes reclaimed in the current scan session.
+let dupesFreedBytes = 0;
+
+function updateDupesStatus(statusEl: HTMLElement | null, groupsRemaining: number) {
+  if (!statusEl) return;
+  const groupsLabel = `${groupsRemaining} duplicate group${groupsRemaining === 1 ? '' : 's'} remaining`;
+  const freedLabel = dupesFreedBytes > 0 ? ` — reclaimed ${formatBytes(dupesFreedBytes)}` : '';
+  statusEl.textContent = `${groupsLabel}${freedLabel}`;
+}
+
+function wireDuplicateRemoveButtons(container: HTMLElement, statusEl: HTMLElement | null = null) {
   container.querySelectorAll('.dupe-hide-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const id = (btn as HTMLElement).dataset.id!;
@@ -675,6 +697,50 @@ function wireDuplicateRemoveButtons(container: HTMLElement) {
       await saveHiddenGames(Array.from(hiddenGameIds));
       (btn as HTMLButtonElement).disabled = true;
       btn.textContent = 'Hidden';
+    });
+  });
+
+  container.querySelectorAll('.dupe-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const el = btn as HTMLButtonElement;
+      const id = el.dataset.id!;
+      const name = el.dataset.name || id;
+      const size = Number(el.dataset.size || '0');
+      const ok = confirm(
+        `Delete the ROM file for "${name}"?\n\n` +
+        `This will permanently remove the file (${formatBytes(size)}) and its sidecar artwork from disk. ` +
+        `This cannot be undone.`
+      );
+      if (!ok) return;
+      el.disabled = true;
+      el.textContent = 'Deleting...';
+      try {
+        const result = await deleteDuplicate(id);
+        if (!result.ok) {
+          el.disabled = false;
+          el.textContent = 'Delete';
+          toast(`Delete failed: ${result.message ?? 'unknown error'}`);
+          return;
+        }
+        dupesFreedBytes += result.bytes_freed ?? 0;
+
+        // Remove the row; if the group has fewer than 2 copies left, remove the group too.
+        const row = el.closest('.dupe-row');
+        const group = el.closest('.dupe-group');
+        row?.remove();
+        if (group && group.querySelectorAll('.dupe-row').length < 2) group.remove();
+
+        const groupsRemaining = container.querySelectorAll('.dupe-group').length;
+        if (groupsRemaining === 0 && !container.querySelector('.setting-hint')) {
+          container.innerHTML = '<p class="setting-hint">No duplicates remaining.</p>';
+        }
+        updateDupesStatus(statusEl, groupsRemaining);
+        toast(`Deleted (${formatBytes(result.bytes_freed ?? 0)} reclaimed)`);
+      } catch (e) {
+        el.disabled = false;
+        el.textContent = 'Delete';
+        toast(`Delete failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+      }
     });
   });
 }
@@ -770,6 +836,19 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeGameCardMenu();
+});
+
+// Progress log toggle (Settings > ROM scan/scrape panels)
+document.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest('.log-toggle-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const targetId = btn.dataset.logTarget;
+  if (!targetId) return;
+  const log = document.getElementById(targetId);
+  if (!log) return;
+  const collapsed = log.classList.toggle('collapsed');
+  btn.textContent = collapsed ? 'Show log' : 'Hide log';
+  if (!collapsed) log.scrollTop = log.scrollHeight;
 });
 
 function renderGames(list: GameInfo[]) {
@@ -3733,6 +3812,49 @@ function renderKioskGames() {
   });
 }
 
+function kioskPrevGame() {
+  if (kioskGames.length === 0) return;
+  kioskGameIndex = Math.max(kioskGameIndex - 1, 0);
+  renderKioskGames();
+}
+
+function kioskNextGame() {
+  if (kioskGames.length === 0) return;
+  kioskGameIndex = Math.min(kioskGameIndex + 1, kioskGames.length - 1);
+  renderKioskGames();
+}
+
+function kioskPrevSystem() {
+  if (systems.length === 0) return;
+  kioskSystemIndex = Math.max(kioskSystemIndex - 1, 0);
+  renderKioskSystems();
+  loadKioskGames();
+}
+
+function kioskNextSystem() {
+  if (systems.length === 0) return;
+  kioskSystemIndex = Math.min(kioskSystemIndex + 1, systems.length - 1);
+  renderKioskSystems();
+  loadKioskGames();
+}
+
+function wireKioskTouchControls() {
+  const stop = (e: Event) => e.stopPropagation();
+  const bind = (id: string, fn: () => void) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('click', (e) => { stop(e); fn(); });
+  };
+  bind('kc-prev-sys', kioskPrevSystem);
+  bind('kc-next-sys', kioskNextSystem);
+  bind('kc-prev-game', kioskPrevGame);
+  bind('kc-next-game', kioskNextGame);
+  bind('kc-play', launchKioskGame);
+  bind('kc-info', openKioskGameDetail);
+  bind('kc-platform', openKioskSystemDetail);
+  bind('kc-exit', exitKioskMode);
+}
+
 function launchKioskGame() {
   const game = kioskGames[kioskGameIndex];
   const sys = systems[kioskSystemIndex];
@@ -4349,6 +4471,141 @@ async function loadAllPlugins() {
   }
 }
 
+// ── PWA install ─────────────────────────────────────────────────────────
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+}
+
+const PWA_DISMISS_KEY = 'pwa-banner-dismissed';
+
+function isStandalone(): boolean {
+  return window.matchMedia('(display-mode: standalone)').matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
+function isIosSafari(): boolean {
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua)
+    || (navigator.platform === 'MacIntel' && (navigator as Navigator & { maxTouchPoints?: number }).maxTouchPoints! > 1);
+  // On iOS *every* browser uses WebKit, so Safari instructions apply universally.
+  return isIOS;
+}
+
+function initPwaInstall(): void {
+  const $banner = document.getElementById('pwa-banner');
+  const $bannerTitle = document.getElementById('pwa-banner-title');
+  const $bannerDesc = document.getElementById('pwa-banner-desc');
+  const $bannerAction = document.getElementById('pwa-banner-action') as HTMLButtonElement | null;
+  const $bannerDismiss = document.getElementById('pwa-banner-dismiss');
+  const $status = document.getElementById('pwa-install-status');
+  const $actions = document.getElementById('pwa-install-actions');
+
+  let deferredPrompt: BeforeInstallPromptEvent | null = null;
+  const standalone = isStandalone();
+  const ios = isIosSafari();
+
+  const updateSettingsUI = () => {
+    if (!$status || !$actions) return;
+    $actions.innerHTML = '';
+    if (standalone) {
+      $status.textContent = 'RetroWeb is currently running as an installed app. Fullscreen and home-screen launch are active.';
+      return;
+    }
+    if (ios) {
+      $status.textContent = 'On iPhone / iPad, use Safari → Share → Add to Home Screen. Once installed, launching from the home-screen icon hides the browser bar and enables true fullscreen.';
+      return;
+    }
+    if (deferredPrompt) {
+      $status.textContent = 'Your browser supports one-click install.';
+      const btn = document.createElement('button');
+      btn.className = 'action-btn';
+      btn.textContent = 'Install RetroWeb';
+      btn.addEventListener('click', async () => {
+        if (!deferredPrompt) return;
+        await deferredPrompt.prompt();
+        await deferredPrompt.userChoice;
+        deferredPrompt = null;
+        updateSettingsUI();
+      });
+      $actions.appendChild(btn);
+      return;
+    }
+    $status.textContent = 'See your browser menu for "Install app" or "Add to Home Screen". Expand the section below for per-platform steps.';
+  };
+
+  const showBanner = (title: string, desc: string, actionLabel: string | null, onAction: (() => void) | null) => {
+    if (!$banner || !$bannerTitle || !$bannerDesc || !$bannerAction) return;
+    $bannerTitle.textContent = title;
+    $bannerDesc.textContent = desc;
+    if (actionLabel && onAction) {
+      $bannerAction.textContent = actionLabel;
+      $bannerAction.style.display = '';
+      $bannerAction.onclick = onAction;
+    } else {
+      $bannerAction.style.display = 'none';
+    }
+    $banner.classList.remove('hidden');
+  };
+
+  const hideBanner = () => $banner?.classList.add('hidden');
+
+  $bannerDismiss?.addEventListener('click', () => {
+    try { localStorage.setItem(PWA_DISMISS_KEY, String(Date.now())); } catch { /* private mode */ }
+    hideBanner();
+  });
+
+  const dismissedRecently = (() => {
+    try {
+      const v = localStorage.getItem(PWA_DISMISS_KEY);
+      if (!v) return false;
+      // Re-prompt after 14 days
+      return Date.now() - Number(v) < 14 * 24 * 3600 * 1000;
+    } catch { return false; }
+  })();
+
+  // Android/desktop Chromium: capture the install prompt
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e as BeforeInstallPromptEvent;
+    updateSettingsUI();
+    if (!standalone && !dismissedRecently) {
+      showBanner(
+        'Install RetroWeb',
+        'Install for a true app experience — fullscreen, no browser bar.',
+        'Install',
+        async () => {
+          if (!deferredPrompt) return;
+          await deferredPrompt.prompt();
+          await deferredPrompt.userChoice;
+          deferredPrompt = null;
+          hideBanner();
+          updateSettingsUI();
+        },
+      );
+    }
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredPrompt = null;
+    hideBanner();
+    updateSettingsUI();
+  });
+
+  // iOS Safari: no beforeinstallprompt; show a hint banner instead.
+  if (ios && !standalone && !dismissedRecently) {
+    showBanner(
+      'Add to Home Screen',
+      'For fullscreen on iPhone: tap Share → "Add to Home Screen".',
+      null,
+      null,
+    );
+  }
+
+  updateSettingsUI();
+}
+
 // ── Init ────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -4471,8 +4728,20 @@ async function init() {
 
   $fullscreenBtn.addEventListener('click', () => enterFullscreen('emulator-container'));
 
+  // Floating in-player controls (visible during gameplay; only on touch devices)
+  const $pfBack = document.getElementById('pf-back-btn');
+  const $pfFs = document.getElementById('pf-fullscreen-btn');
+  $pfBack?.addEventListener('click', () => $playerBackBtn.click());
+  $pfFs?.addEventListener('click', () => enterFullscreen('emulator-container'));
+
   // FullView toggle from header
   $fullviewBtn.addEventListener('click', () => enterKioskMode());
+
+  // FullView touch/click controls (mobile + PC)
+  wireKioskTouchControls();
+
+  // PWA install flow
+  initPwaInstall();
 
   // FullView detail overlay actions
   $kioskDetailCloseBtn.addEventListener('click', () => closeKioskDetail());
@@ -4507,11 +4776,12 @@ async function init() {
       ($dupesBtn as HTMLButtonElement).disabled = true;
       $dupesStatus.textContent = 'Scanning... (hashing first 64KB of each ROM)';
       $dupesResults.innerHTML = '';
+      dupesFreedBytes = 0;
       try {
         const groups = await scanDuplicates();
         $dupesStatus.textContent = `${groups.length} duplicate group${groups.length === 1 ? '' : 's'} found`;
         $dupesResults.innerHTML = renderDuplicateGroupsHTML(groups);
-        wireDuplicateRemoveButtons($dupesResults);
+        wireDuplicateRemoveButtons($dupesResults, $dupesStatus);
       } catch {
         $dupesStatus.textContent = 'Scan failed';
       } finally {

@@ -2806,6 +2806,67 @@ fn hash_file_head(path: &std::path::Path) -> Option<String> {
     Some(format!("{:016x}", hash))
 }
 
+#[derive(Deserialize)]
+struct DeleteDuplicateBody {
+    game_id: String,
+}
+
+/// Delete a single ROM file (and its sidecar artwork) to reclaim storage.
+/// POST /api/duplicates/delete   body: { game_id: "system:file_name" }
+async fn delete_duplicate(
+    State(state): State<AppState>,
+    Json(body): Json<DeleteDuplicateBody>,
+) -> Json<serde_json::Value> {
+    let Some((system, file_name)) = body.game_id.split_once(':') else {
+        return Json(serde_json::json!({"ok": false, "message": "Invalid game id"}));
+    };
+    if system.is_empty() || file_name.is_empty()
+        || system.contains('/') || system.contains("..")
+        || file_name.contains('/') || file_name.contains("..") {
+        return Json(serde_json::json!({"ok": false, "message": "Invalid game id"}));
+    }
+
+    let rom_dir = state.inner.rom_dir.read().await.clone();
+    let rom_path = rom_dir.join(system).join(file_name);
+
+    // Ensure the resolved path is still inside the ROM directory.
+    let canonical_rom_dir = std::fs::canonicalize(&rom_dir).ok();
+    let canonical_target = std::fs::canonicalize(&rom_path).ok();
+    match (canonical_rom_dir, canonical_target) {
+        (Some(root), Some(target)) if target.starts_with(&root) => {}
+        _ => return Json(serde_json::json!({"ok": false, "message": "Path outside ROM directory"})),
+    }
+
+    let bytes_freed = std::fs::metadata(&rom_path).map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = std::fs::remove_file(&rom_path) {
+        return Json(serde_json::json!({"ok": false, "message": format!("Delete failed: {}", e)}));
+    }
+
+    // Best-effort: remove sidecar art (image with the same stem).
+    let stem = std::path::Path::new(file_name)
+        .file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let image_dir = rom_dir.join(system).join("images");
+    remove_existing_images(&image_dir, &stem);
+
+    push_log(&state, "info", &format!("Deleted duplicate: {}/{} ({} bytes)", system, file_name, bytes_freed)).await;
+
+    // Refresh library so the UI no longer shows the removed file.
+    let library = scan_rom_directory(&rom_dir, &state.inner.data_dir);
+    *state.inner.library.write().await = library;
+
+    // Also strip it from cached duplicate groups.
+    let mut dupes = state.inner.duplicates.write().await;
+    for group in dupes.iter_mut() {
+        group.games.retain(|g| g.id != body.game_id);
+    }
+    dupes.retain(|g| g.games.len() >= 2);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "bytes_freed": bytes_freed,
+    }))
+}
+
 // ── Logs ─────────────────────────────────────────────────────────────
 
 async fn get_logs(State(state): State<AppState>) -> Json<Vec<LogEntry>> {
@@ -3057,6 +3118,7 @@ async fn main() {
         .route("/api/hidden-games", get(list_hidden_games).post(set_hidden_games))
         // Duplicate detection
         .route("/api/duplicates/scan", post(scan_duplicates))
+        .route("/api/duplicates/delete", post(delete_duplicate))
         // Logs + version
         .route("/api/logs", get(get_logs).delete(clear_logs))
         .route("/api/version", get(get_version))

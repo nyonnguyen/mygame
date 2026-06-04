@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#1a1a2e"/>
+  <!-- Safe zone is inner 80% per maskable spec; gamepad sits within ~60% radius -->
+  <g transform="translate(112,196)" fill="none">
+    <rect x="0" y="0" width="288" height="160" rx="44" fill="#e60012"/>
+    <g fill="#1a1a2e" transform="translate(56,80)">
+      <rect x="-9" y="-32" width="18" height="64" rx="3"/>
+      <rect x="-32" y="-9" width="64" height="18" rx="3"/>
+    </g>
+    <g fill="#1a1a2e" transform="translate(220,80)">
+      <circle cx="0" cy="-22" r="10"/>
+      <circle cx="22" cy="0" r="10"/>
+      <circle cx="0" cy="22" r="10"/>
+      <circle cx="-22" cy="0" r="10"/>
+    </g>
+    <circle cx="144" cy="80" r="7" fill="#ffd700"/>
+  </g>
+</svg>

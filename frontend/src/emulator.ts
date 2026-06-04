@@ -34,15 +34,17 @@ export function launchGame(game: GameInfo, system: SystemInfo, containerId: stri
 
   const container = document.getElementById(containerId);
   if (!container) return;
-  container.innerHTML = '';
+  // Clear iframe / leftover content but keep the floating controls overlay,
+  // which is the only way to exit fullscreen on mobile.
+  clearContainerKeepControls(container);
 
   const ejsCore = CORE_ALIAS[system.core] || system.core;
 
   if (!SUPPORTED_CORES.has(ejsCore)) {
-    container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#e4e4ef;font-size:1.1rem;text-align:center;padding:20px;">
-      Core <strong style="color:#6c5ce7;margin:0 6px;">${ejsCore}</strong> is not supported in browser.<br>
-      System: ${system.name}
-    </div>`;
+    const msg = document.createElement('div');
+    msg.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#e4e4ef;font-size:1.1rem;text-align:center;padding:20px;';
+    msg.innerHTML = `Core <strong style="color:#6c5ce7;margin:0 6px;">${ejsCore}</strong> is not supported in browser.<br>System: ${system.name}`;
+    container.insertBefore(msg, container.firstChild);
     return;
   }
 
@@ -77,9 +79,56 @@ export function cleanup(): void {
     currentIframe.remove();
     currentIframe = null;
   }
+  // Always exit pseudo-fullscreen on cleanup so the body's overflow:hidden
+  // and the fixed container don't leak into other views.
+  document.querySelectorAll('.pseudo-fullscreen').forEach((el) =>
+    el.classList.remove('pseudo-fullscreen'),
+  );
+  document.body.classList.remove('pseudo-fullscreen-active');
+}
+
+function clearContainerKeepControls(container: HTMLElement): void {
+  Array.from(container.children).forEach((child) => {
+    if (!(child as HTMLElement).classList.contains('player-floating-controls')) {
+      child.remove();
+    }
+  });
 }
 
 export function enterFullscreen(containerId: string): void {
-  const target: Element | null = currentIframe ?? document.getElementById(containerId);
-  target?.requestFullscreen?.().catch(() => { /* user activation may be absent */ });
+  // Target the container (not the iframe) so sibling overlays — like the
+  // floating exit/fullscreen controls — remain visible while in fullscreen.
+  const target = (document.getElementById(containerId) ?? currentIframe) as HTMLElement | null;
+  if (!target) return;
+
+  // Toggle behaviour — needed especially on iOS where there's no system
+  // chrome to exit pseudo-fullscreen.
+  if (target.classList.contains('pseudo-fullscreen')) {
+    exitPseudoFullscreen(target);
+    return;
+  }
+  if (document.fullscreenElement === target) {
+    document.exitFullscreen?.();
+    return;
+  }
+
+  // iOS Safari / Chrome on iPhone don't support Fullscreen API on non-video
+  // elements (requestFullscreen is undefined). Fall back to CSS pseudo-fs.
+  const req = target.requestFullscreen
+    ?? (target as unknown as { webkitRequestFullscreen?: () => Promise<void> }).webkitRequestFullscreen;
+  if (typeof req === 'function') {
+    Promise.resolve(req.call(target)).catch(() => enterPseudoFullscreen(target));
+  } else {
+    enterPseudoFullscreen(target);
+  }
+}
+
+function enterPseudoFullscreen(el: HTMLElement): void {
+  el.classList.add('pseudo-fullscreen');
+  document.body.classList.add('pseudo-fullscreen-active');
+}
+
+function exitPseudoFullscreen(el: HTMLElement): void {
+  el.classList.remove('pseudo-fullscreen');
+  document.body.classList.remove('pseudo-fullscreen-active');
 }

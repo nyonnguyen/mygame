@@ -2,15 +2,39 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>RetroWeb</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <meta name="application-name" content="RetroWeb" />
+  <!-- iOS PWA: these make "Add to Home Screen" launch without browser chrome -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="RetroWeb" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="stylesheet" href="/src/styles.css" />
 </head>
 <body>
   <div id="app-bg"></div>
   <div id="system-bg-overlay"></div>
   <div id="app">
+    <!-- PWA install banner (shown on first eligible visit; dismissible) -->
+    <div id="pwa-banner" class="pwa-banner hidden" role="dialog" aria-label="Install RetroWeb">
+      <div class="pwa-banner-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+      </div>
+      <div class="pwa-banner-text">
+        <strong id="pwa-banner-title">Install RetroWeb</strong>
+        <span id="pwa-banner-desc">Add to Home Screen for true fullscreen and a real app feel.</span>
+      </div>
+      <div class="pwa-banner-actions">
+        <button id="pwa-banner-action" class="pwa-banner-btn pwa-banner-primary">Install</button>
+        <button id="pwa-banner-dismiss" class="pwa-banner-btn" aria-label="Dismiss">&#10005;</button>
+      </div>
+    </div>
+
     <!-- Header (hidden in kiosk mode) -->
     <header id="header">
       <div class="header-left">
@@ -241,6 +265,14 @@
         </div>
         <div id="emulator-container" class="emulator-container">
           <div id="game"></div>
+          <div class="player-floating-controls" id="player-floating-controls" aria-hidden="false">
+            <button id="pf-back-btn" class="pf-btn" title="Exit game" aria-label="Exit game">&#10005;</button>
+            <button id="pf-fullscreen-btn" class="pf-btn" title="Toggle fullscreen" aria-label="Toggle fullscreen">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -294,6 +326,40 @@
               </div>
             </section>
             <!-- FullView now uses the same theme as the main app -->
+            <section class="settings-section" id="pwa-install-section">
+              <h3>Install as App</h3>
+              <p class="setting-hint" id="pwa-install-status">RetroWeb can run as a standalone app — no browser bar, true fullscreen on iPhone.</p>
+              <div id="pwa-install-actions" class="setting-row" style="margin-top:8px;"></div>
+              <details style="margin-top:10px;">
+                <summary style="cursor:pointer;color:var(--text-dim);font-size:0.9rem;">How to install on each platform</summary>
+                <div class="pwa-install-help">
+                  <div class="pwa-platform">
+                    <strong>iPhone / iPad (Safari)</strong>
+                    <ol>
+                      <li>Tap the <strong>Share</strong> button (square with arrow up) in the toolbar.</li>
+                      <li>Scroll and tap <strong>Add to Home Screen</strong>.</li>
+                      <li>Confirm — RetroWeb icon appears on the home screen. Open it from there for fullscreen.</li>
+                    </ol>
+                    <p class="setting-hint">Note: Chrome / Firefox / Edge on iPhone all use Safari's engine. You must use Safari to install. After installing, the icon launches in its own window regardless of browser.</p>
+                  </div>
+                  <div class="pwa-platform">
+                    <strong>Android (Chrome / Edge)</strong>
+                    <ol>
+                      <li>Tap the <strong>⋮ menu</strong> in the top-right.</li>
+                      <li>Tap <strong>Install app</strong> or <strong>Add to Home Screen</strong>.</li>
+                      <li>Confirm — RetroWeb appears in the app drawer.</li>
+                    </ol>
+                  </div>
+                  <div class="pwa-platform">
+                    <strong>Desktop (Chrome / Edge)</strong>
+                    <ol>
+                      <li>Click the <strong>install icon</strong> (⊕ or monitor with arrow) in the address bar.</li>
+                      <li>Or use menu → <strong>Install RetroWeb</strong> / <strong>Apps → Install this site as an app</strong>.</li>
+                    </ol>
+                  </div>
+                </div>
+              </details>
+            </section>
           </div>
 
           <!-- ROMs Tab -->
@@ -307,141 +373,163 @@
                 <button id="rescan-btn" class="action-btn">Rescan</button>
               </div>
               <p id="rom-dir-status" class="setting-hint"></p>
-              <!-- Scan Progress Panel -->
               <div id="scan-progress-panel" class="progress-panel hidden">
                 <div class="progress-header">
-                  <span id="scan-progress-title">Scanning...</span>
-                  <span id="scan-progress-count" class="progress-count"></span>
+                  <span id="scan-progress-title" class="progress-header-title">Scanning...</span>
+                  <span class="progress-header-meta">
+                    <span id="scan-progress-count" class="progress-count"></span>
+                    <button type="button" class="log-toggle-btn" data-log-target="scan-progress-log">Show log</button>
+                  </span>
                 </div>
                 <div class="progress-bar-container">
                   <div id="scan-progress-bar" class="progress-bar"></div>
                 </div>
-                <div id="scan-progress-log" class="progress-log"></div>
+                <div id="scan-progress-log" class="progress-log collapsed"></div>
               </div>
             </section>
+
             <section class="settings-section">
               <h3>Thumbnail Scraper</h3>
-              <p class="setting-hint">Downloads box art from a libretro-thumbnails compatible server.<br>
-                URL format: <code>{source}/{System Name}/Named_Boxarts/{Game}.png</code></p>
-              <div style="margin-top:8px;">
-                <label class="mapping-toolbar-label">Sources (first = primary, others = fallback):</label>
+              <p class="setting-hint">Downloads box art from a libretro-thumbnails compatible server. URL format: <code>{source}/{System Name}/Named_Boxarts/{Game}.png</code></p>
+
+              <div class="setting-group">
+                <label class="setting-group-label">Sources (first = primary, others = fallback)</label>
                 <div id="scrape-sources-list" class="scrape-sources-list"></div>
-                <div style="margin-top:8px;">
-                  <label class="mapping-toolbar-label" style="font-size:0.8rem; color:var(--text-dim);">Add from known servers:</label>
-                  <div id="scrape-known-sources" class="scrape-known-grid"></div>
-                </div>
-                <div class="setting-row" style="margin-top:6px;">
+                <div class="setting-row spaced">
                   <input type="text" id="scrape-source-add-input" class="setting-input" placeholder="Custom URL..." />
                   <button id="scrape-source-add-btn" class="action-btn sm">Add</button>
                 </div>
               </div>
-              <div class="setting-row" style="margin-top:6px;">
-                <label class="mapping-toolbar-label" style="min-width:60px;">Delay:</label>
-                <input type="number" id="scrape-delay-input" class="setting-input" style="max-width:100px;min-width:80px;" placeholder="100" min="0" max="5000" />
-                <span class="setting-hint" style="margin:0;">ms between requests</span>
+
+              <div class="setting-group">
+                <label class="setting-group-label">Add from known servers</label>
+                <div id="scrape-known-sources" class="scrape-known-grid"></div>
               </div>
-              <div class="setting-row" style="margin-top:8px;">
-                <label class="setting-toggle">
-                  <input type="checkbox" id="ddg-fallback-input" />
-                  <span>DuckDuckGo image fallback</span>
-                </label>
-                <span class="setting-hint" style="margin:0; margin-left:8px;">Search DuckDuckGo when all sources fail</span>
-              </div>
-              <div class="setting-row" style="margin-top:8px;">
-                <button id="save-scrape-settings-btn" class="action-btn">Save Scrape Settings</button>
-              </div>
-              <p id="scrape-settings-status" class="setting-hint"></p>
-              <!-- Scrape section: system selector + run -->
-              <div style="margin-top:12px; border-top: 1px solid var(--border); padding-top: 12px;">
-                <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:8px;">Scrape Thumbnails</h4>
+
+              <div class="setting-group">
+                <label class="setting-group-label">Options</label>
                 <div class="setting-row">
-                  <select id="scrape-system-select" class="setting-input compact-select" style="min-width:200px;">
+                  <label class="mapping-toolbar-label" style="min-width:60px;">Delay:</label>
+                  <input type="number" id="scrape-delay-input" class="setting-input compact-input" placeholder="100" min="0" max="5000" />
+                  <span class="setting-hint" style="margin:0;">ms between requests</span>
+                </div>
+                <div class="setting-row spaced">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="ddg-fallback-input" />
+                    <span>DuckDuckGo image fallback</span>
+                  </label>
+                  <span class="setting-hint" style="margin:0;">Search DuckDuckGo when all sources fail</span>
+                </div>
+              </div>
+
+              <div class="setting-row spaced">
+                <button id="save-scrape-settings-btn" class="action-btn">Save Scrape Settings</button>
+                <span id="scrape-settings-status" class="setting-hint" style="margin:0;"></span>
+              </div>
+
+              <div class="settings-subsection">
+                <div class="settings-subsection-title">Scrape Thumbnails</div>
+                <div class="setting-row">
+                  <select id="scrape-system-select" class="setting-input compact-select">
                     <option value="">-- Select System --</option>
                   </select>
                   <button id="scrape-run-btn" class="action-btn">Scrape</button>
                   <button id="scrape-all-btn" class="action-btn">Scrape All</button>
                 </div>
-              </div>
-              <!-- Scrape Progress Panel -->
-              <div id="scrape-progress-panel" class="progress-panel hidden" style="margin-top:10px;">
-                <div class="progress-header">
-                  <span id="scrape-progress-title">Scraping...</span>
-                  <span id="scrape-progress-count" class="progress-count"></span>
+                <div id="scrape-progress-panel" class="progress-panel hidden">
+                  <div class="progress-header">
+                    <span id="scrape-progress-title" class="progress-header-title">Scraping...</span>
+                    <span class="progress-header-meta">
+                      <span id="scrape-progress-count" class="progress-count"></span>
+                      <button type="button" class="log-toggle-btn" data-log-target="scrape-progress-log">Show log</button>
+                    </span>
+                  </div>
+                  <div class="progress-bar-container">
+                    <div id="scrape-progress-bar" class="progress-bar"></div>
+                  </div>
+                  <div id="scrape-progress-log" class="progress-log collapsed"></div>
                 </div>
-                <div class="progress-bar-container">
-                  <div id="scrape-progress-bar" class="progress-bar"></div>
-                </div>
-                <div id="scrape-progress-log" class="progress-log"></div>
               </div>
             </section>
-            <section class="settings-section">
-              <h3>Duplicate Detection</h3>
-              <p class="setting-hint">Scan ROM files for content duplicates (same hash). Useful for cleaning up multi-region copies.</p>
-              <div class="setting-row">
-                <button id="dupes-scan-btn" class="action-btn">Scan for Duplicates</button>
-                <span id="dupes-status" class="setting-hint" style="margin:0;"></span>
-              </div>
-              <div id="dupes-results" class="dupes-results"></div>
-            </section>
+
             <section class="settings-section">
               <h3>Game Info Scraper</h3>
-              <p class="setting-hint">Downloads game descriptions, publisher, developer, year, genre from online databases.<br>
-                <strong>Primary:</strong> ScreenScraper.fr (best for retro games) &rarr; <strong>Fallback:</strong> RAWG.io (broader database)</p>
-              <div class="setting-row" style="margin-top:8px;">
+              <p class="setting-hint">Downloads game descriptions, publisher, developer, year, genre from online databases. <strong>Primary:</strong> ScreenScraper.fr &rarr; <strong>Fallback:</strong> RAWG.io.</p>
+
+              <div class="setting-row spaced">
                 <label class="setting-toggle">
                   <input type="checkbox" id="scrape-metadata-input" />
                   <span>Auto-scrape metadata with thumbnails</span>
                 </label>
-                <span class="setting-hint" style="margin:0; margin-left:8px;">Also fetch game info when scraping art</span>
+                <span class="setting-hint" style="margin:0;">Also fetch game info when scraping art</span>
               </div>
-              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
-                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">ScreenScraper.fr Credentials (recommended, tried first):</label>
-                <div class="setting-row">
-                  <input type="text" id="ss-user-input" class="setting-input" placeholder="Username" style="max-width:200px;" autocomplete="off" />
-                  <input type="password" id="ss-pass-input" class="setting-input" placeholder="Password" style="max-width:200px;" autocomplete="off" />
+
+              <div class="setting-group">
+                <label class="setting-group-label">Credentials</label>
+                <div class="creds-grid">
+                  <div class="creds-block">
+                    <span class="creds-block-label">ScreenScraper.fr (recommended)</span>
+                    <div class="setting-row">
+                      <input type="text" id="ss-user-input" class="setting-input" placeholder="Username" autocomplete="off" />
+                      <input type="password" id="ss-pass-input" class="setting-input" placeholder="Password" autocomplete="off" />
+                    </div>
+                    <p class="setting-hint">Free account at <a href="https://www.screenscraper.fr" target="_blank" style="color:var(--accent);">screenscraper.fr</a>.</p>
+                  </div>
+                  <div class="creds-block">
+                    <span class="creds-block-label">RAWG.io (fallback)</span>
+                    <div class="setting-row">
+                      <input type="text" id="rawg-key-input" class="setting-input" placeholder="API Key" autocomplete="off" />
+                    </div>
+                    <p class="setting-hint">Free key at <a href="https://rawg.io/apidocs" target="_blank" style="color:var(--accent);">rawg.io/apidocs</a>.</p>
+                  </div>
+                  <div class="creds-block">
+                    <span class="creds-block-label">SteamGridDB (banner + logo)</span>
+                    <div class="setting-row">
+                      <input type="text" id="sgdb-key-input" class="setting-input" placeholder="API Key" autocomplete="off" />
+                    </div>
+                    <p class="setting-hint">Free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" style="color:var(--accent);">steamgriddb.com</a>.</p>
+                  </div>
                 </div>
-                <p class="setting-hint">Free account at <a href="https://www.screenscraper.fr" target="_blank" style="color:var(--accent);">screenscraper.fr</a>. Best source for retro game metadata.</p>
               </div>
-              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
-                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">RAWG.io API Key (fallback):</label>
-                <div class="setting-row">
-                  <input type="text" id="rawg-key-input" class="setting-input" placeholder="API Key" style="max-width:400px;" autocomplete="off" />
-                </div>
-                <p class="setting-hint">Free key at <a href="https://rawg.io/apidocs" target="_blank" style="color:var(--accent);">rawg.io/apidocs</a>. Used as fallback when ScreenScraper misses.</p>
-              </div>
-              <div style="margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm);">
-                <label class="mapping-toolbar-label" style="margin-bottom:8px; display:block;">SteamGridDB API Key (banner + logo):</label>
-                <div class="setting-row">
-                  <input type="text" id="sgdb-key-input" class="setting-input" placeholder="API Key" style="max-width:400px;" autocomplete="off" />
-                </div>
-                <p class="setting-hint">Free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" style="color:var(--accent);">steamgriddb.com</a>. Used for hero banners and transparent logos.</p>
-              </div>
-              <div class="setting-row" style="margin-top:8px;">
+
+              <div class="setting-row spaced">
                 <button id="save-info-settings-btn" class="action-btn">Save Info Settings</button>
+                <span id="info-settings-status" class="setting-hint" style="margin:0;"></span>
               </div>
-              <p id="info-settings-status" class="setting-hint"></p>
-              <!-- Scrape Info section: system selector + run -->
-              <div style="margin-top:12px; border-top: 1px solid var(--border); padding-top: 12px;">
-                <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:8px;">Scrape Game Info</h4>
+
+              <div class="settings-subsection">
+                <div class="settings-subsection-title">Scrape Game Info</div>
                 <div class="setting-row">
-                  <select id="scrape-info-system-select" class="setting-input compact-select" style="min-width:200px;">
+                  <select id="scrape-info-system-select" class="setting-input compact-select">
                     <option value="">-- Select System --</option>
                   </select>
                   <button id="scrape-info-run-btn" class="action-btn">Scrape Info</button>
                   <button id="scrape-info-all-btn" class="action-btn">Scrape All Info</button>
                 </div>
-              </div>
-              <!-- Info Scrape Progress Panel -->
-              <div id="scrape-info-progress-panel" class="progress-panel hidden" style="margin-top:10px;">
-                <div class="progress-header">
-                  <span id="scrape-info-progress-title">Scraping info...</span>
-                  <span id="scrape-info-progress-count" class="progress-count"></span>
+                <div id="scrape-info-progress-panel" class="progress-panel hidden">
+                  <div class="progress-header">
+                    <span id="scrape-info-progress-title" class="progress-header-title">Scraping info...</span>
+                    <span class="progress-header-meta">
+                      <span id="scrape-info-progress-count" class="progress-count"></span>
+                      <button type="button" class="log-toggle-btn" data-log-target="scrape-info-progress-log">Show log</button>
+                    </span>
+                  </div>
+                  <div class="progress-bar-container">
+                    <div id="scrape-info-progress-bar" class="progress-bar"></div>
+                  </div>
+                  <div id="scrape-info-progress-log" class="progress-log collapsed"></div>
                 </div>
-                <div class="progress-bar-container">
-                  <div id="scrape-info-progress-bar" class="progress-bar"></div>
-                </div>
-                <div id="scrape-info-progress-log" class="progress-log"></div>
               </div>
+            </section>
+
+            <section class="settings-section">
+              <h3>Duplicate Detection</h3>
+              <p class="setting-hint">Scan ROM files for content duplicates (same hash). Useful for cleaning up multi-region copies.</p>
+              <div class="setting-row spaced">
+                <button id="dupes-scan-btn" class="action-btn">Scan for Duplicates</button>
+                <span id="dupes-status" class="setting-hint" style="margin:0;"></span>
+              </div>
+              <div id="dupes-results" class="dupes-results"></div>
             </section>
           </div>
 
@@ -630,6 +718,32 @@ export default {
           <div id="kiosk-games-carousel" class="kiosk-games-carousel"></div>
         </div>
         <div class="kiosk-footer">
+          <div class="kiosk-touch-controls" id="kiosk-touch-controls">
+            <button class="kc-btn" id="kc-prev-sys" title="Previous system" aria-label="Previous system">
+              <span class="kc-icon">&#x25B2;</span><span class="kc-label">System</span>
+            </button>
+            <button class="kc-btn" id="kc-next-sys" title="Next system" aria-label="Next system">
+              <span class="kc-icon">&#x25BC;</span><span class="kc-label">System</span>
+            </button>
+            <button class="kc-btn" id="kc-prev-game" title="Previous game" aria-label="Previous game">
+              <span class="kc-icon">&#x25C0;</span><span class="kc-label">Game</span>
+            </button>
+            <button class="kc-btn kc-info" id="kc-info" title="Game info" aria-label="Game info">
+              <span class="kc-icon">&#9432;</span><span class="kc-label">Info</span>
+            </button>
+            <button class="kc-btn kc-primary" id="kc-play" title="Play game" aria-label="Play game">
+              <span class="kc-icon">&#9654;</span><span class="kc-label">Play</span>
+            </button>
+            <button class="kc-btn kc-platform" id="kc-platform" title="Platform info" aria-label="Platform info">
+              <span class="kc-icon">&#x229E;</span><span class="kc-label">Platform</span>
+            </button>
+            <button class="kc-btn" id="kc-next-game" title="Next game" aria-label="Next game">
+              <span class="kc-icon">&#x25B6;</span><span class="kc-label">Game</span>
+            </button>
+            <button class="kc-btn kc-exit" id="kc-exit" title="Exit FullView" aria-label="Exit FullView">
+              <span class="kc-icon">&#10005;</span><span class="kc-label">Exit</span>
+            </button>
+          </div>
           <div class="kiosk-controls-guide">
             <span class="kiosk-key">&#x25C0;&#x25B6;</span> Games
             <span class="kiosk-sep">|</span>
@@ -637,7 +751,7 @@ export default {
             <span class="kiosk-sep">|</span>
             <span class="kiosk-key">A</span> Play
             <span class="kiosk-sep">|</span>
-            <span class="kiosk-key">Y</span> Game Info
+            <span class="kiosk-key">Y</span> Info
             <span class="kiosk-sep">|</span>
             <span class="kiosk-key">X</span> Platform
             <span class="kiosk-sep">|</span>

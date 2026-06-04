@@ -339,6 +339,22 @@ export async function scanDuplicates(): Promise<DuplicateGroup[]> {
   return res.json();
 }
 
+export interface DeleteDuplicateResult {
+  ok: boolean;
+  bytes_freed?: number;
+  message?: string;
+}
+
+export async function deleteDuplicate(gameId: string): Promise<DeleteDuplicateResult> {
+  const res = await fetch(`${API_BASE}/duplicates/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ game_id: gameId }),
+  });
+  if (!res.ok) return { ok: false, message: `HTTP ${res.status}` };
+  return res.json();
+}
+
 // ── Version / Logs / Config Export ─────────────────────────────────────
 
 export interface VersionInfo {
