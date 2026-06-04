@@ -1,12 +1,20 @@
 services:
   retroweb:
+    # Use the pre-built image from GHCR by default; set BUILD=1 to rebuild locally
+    image: ${RETROWEB_IMAGE:-ghcr.io/nyonnguyen/mygame:latest}
     build: .
+    container_name: retroweb
     ports:
-      - "3000:3000"
+      - "${HOST_PORT:-3000}:3000"
     volumes:
-      - ${ROM_DIR:-~/Documents/room-r36-plus}:/roms:ro
+      - ${ROM_DIR:-./roms}:/roms:ro
+      - retroweb-data:/data
     environment:
       - ROM_DIR=/roms
+      - DATA_DIR=/data
       - PORT=3000
-      - RUST_LOG=info
+      - RUST_LOG=${RUST_LOG:-info}
     restart: unless-stopped
+
+volumes:
+  retroweb-data:

@@ -1,6 +1,6 @@
 # RetroWeb - Project Document
 
-> Last updated: 2026-05-30
+> Last updated: 2026-06-04
 
 RetroWeb is a self-hosted retro game launcher and emulator. It runs as a local web server (Rust/Axum backend + TypeScript/Vite frontend) and plays games in the browser via EmulatorJS.
 
@@ -1362,6 +1362,84 @@ Settings > Management > Version shows current version + latest from GitHub relea
 - Latest: `GET https://api.github.com/repos/anthropics/retroweb/releases/latest` (with 5s timeout, fails gracefully).
 
 Endpoint: `GET /api/version` → `{ current, latest, update_available }`.
+
+---
+
+## Docker Deployment
+
+RetroWeb ships as a multi-stage Docker image. The frontend is built with Vite, the backend with Cargo, and the runtime image is a slim Debian with `tini` for proper signal handling.
+
+### Quick start (pre-built image from GHCR)
+
+```bash
+docker run -d --name retroweb \
+  -p 3000:3000 \
+  -v "$HOME/Documents/room-r36-plus:/roms:ro" \
+  -v retroweb-data:/data \
+  ghcr.io/nyonnguyen/mygame:latest
+```
+
+Open <http://localhost:3000>. ROMs are mounted read-only from the host; playtime, collections, scraped art, save states, and other writable state live in the named volume `retroweb-data` so they survive container restarts and image upgrades.
+
+### With docker compose
+
+`docker-compose.yml` is the recommended runner — it sets sensible defaults and respects a few environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RETROWEB_IMAGE` | `ghcr.io/nyonnguyen/mygame:latest` | Image tag to pull |
+| `HOST_PORT` | `3000` | Host port the container binds to |
+| `ROM_DIR` | `./roms` | Host path to ROM library (read-only mount) |
+| `RUST_LOG` | `info` | Backend log level |
+
+```bash
+ROM_DIR=$HOME/Documents/room-r36-plus docker compose up -d
+docker compose logs -f
+docker compose pull && docker compose up -d   # upgrade to latest image
+```
+
+### Building locally
+
+```bash
+docker compose build           # uses Dockerfile in repo root
+docker compose up -d
+```
+
+The build uses BuildKit cache mounts for the Cargo registry, target directory, and npm cache, so subsequent rebuilds are dramatically faster than the first.
+
+### Image internals
+
+- **Stage 1** (`node:22-alpine`) — `npm ci` + `vite build` produces `frontend/dist`.
+- **Stage 2** (`rust:1-bookworm`) — `cargo build --release` against `libssl-dev` (reqwest's native-tls backend needs OpenSSL headers).
+- **Stage 3** (`debian:bookworm-slim`) — `ca-certificates`, `libssl3`, `curl` (for the HEALTHCHECK), and `tini` as PID 1. The binary lives at `/app/retroweb`, the built frontend at `/app/frontend/dist`.
+
+Environment defaults baked into the image:
+
+```
+ROM_DIR=/roms          # mount your library here, read-only
+DATA_DIR=/data         # writable volume for playtime/collections/scraped art
+FRONTEND_DIR=/app/frontend/dist
+PORT=3000
+HOME=/data             # backend's fallback paths key off HOME
+```
+
+A Docker `HEALTHCHECK` curls `/api/health` every 30s; `docker ps` shows `(healthy)` once the server is up. The CI smoke test reuses the same endpoint after pulling the freshly built image.
+
+### CI/CD — `.github/workflows/docker.yml`
+
+GitHub Actions builds and publishes the image to GHCR on every push to `master`/`main` and on `v*` tags:
+
+1. **`build-and-push`** — sets up QEMU + Buildx, logs into GHCR with the workflow's `GITHUB_TOKEN`, and runs `docker/build-push-action` for `linux/amd64,linux/arm64`. Tags are derived by `docker/metadata-action`: branch name, short SHA, `latest` (default branch only), and SemVer tags for `v*` releases. Layer cache uses GitHub Actions cache (`type=gha`).
+2. **`smoke-test`** — pulls the `sha-<short>` tag, runs the container, polls `/api/health` for up to 30s, and fails the run if the server doesn't come up. Container logs are dumped on failure for debugging.
+
+Pull requests build the image but skip the push and smoke-test stages.
+
+To pull a private image from GHCR locally:
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u <username> --password-stdin
+docker pull ghcr.io/nyonnguyen/mygame:latest
+```
 
 ---
 
