@@ -13,7 +13,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 walkdir = "2"
 percent-encoding = "2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "system-proxy"] }
 regex = "1"
 tokio-stream = "0.1"
 

@@ -1,0 +1,185 @@
+name: Build runnable apps
+
+# Builds self-contained, downloadable binaries for Windows, macOS (Intel +
+# Apple Silicon) and Linux on every push to the default branch, then publishes
+# them to a rolling "latest" pre-release so anyone can download and run them
+# directly. Pushing a v* tag publishes a permanent versioned release as well.
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apps-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: retroweb.exe
+            archive: zip
+          - label: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin: retroweb
+            archive: tar
+          - label: macos-x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            bin: retroweb
+            archive: tar
+          - label: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: retroweb
+            archive: tar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Frontend (static dist served by the binary) ──────────────────
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # ── Rust backend ─────────────────────────────────────────────────
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ── Assemble the runnable package ────────────────────────────────
+      - name: Assemble package
+        shell: bash
+        run: |
+          set -e
+          PKG="RetroWeb-${{ matrix.label }}"
+          mkdir -p "dist/$PKG/frontend"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$PKG/"
+          cp -r frontend/dist "dist/$PKG/frontend/dist"
+          cp packaging/README.txt "dist/$PKG/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp packaging/start.bat "dist/$PKG/"
+          else
+            cp packaging/start.sh "dist/$PKG/"
+            chmod +x "dist/$PKG/start.sh" "dist/$PKG/${{ matrix.bin }}"
+          fi
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          cd dist
+          tar czf "RetroWeb-${{ matrix.label }}.tar.gz" "RetroWeb-${{ matrix.label }}"
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          cd dist
+          7z a -tzip "RetroWeb-${{ matrix.label }}.zip" "RetroWeb-${{ matrix.label }}" >/dev/null
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RetroWeb-${{ matrix.label }}
+          path: |
+            dist/RetroWeb-${{ matrix.label }}.tar.gz
+            dist/RetroWeb-${{ matrix.label }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── Publish a rolling "latest" pre-release on every push to default ──
+  release-latest:
+    name: Publish rolling "latest"
+    needs: build
+    if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          # Recreate the tag/release so it points at this commit.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --title "Latest build (rolling)" \
+            --notes "Automatically built from commit ${SHORT_SHA} on \`${GITHUB_REF_NAME}\`.
+
+          Download the file for your system, extract it, and run **start.bat** (Windows) or **./start.sh** (macOS / Linux). See README.txt inside.
+
+          | System | File |
+          |--------|------|
+          | Windows (x64) | RetroWeb-windows-x64.zip |
+          | macOS (Apple Silicon) | RetroWeb-macos-arm64.tar.gz |
+          | macOS (Intel) | RetroWeb-macos-x64.tar.gz |
+          | Linux (x64) | RetroWeb-linux-x64.tar.gz |" \
+            artifacts/*
+
+  # ── Publish a permanent versioned release when a v* tag is pushed ────
+  release-tag:
+    name: Publish tagged release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "RetroWeb ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/*
