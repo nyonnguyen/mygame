@@ -1,77 +1,77 @@
 # RetroWeb
 
-Trình giả lập game retro chạy trên trình duyệt — backend Rust (Axum) phục vụ thư viện ROM và frontend chơi game ngay trong browser. Hỗ trợ thư viện game, thời gian chơi, bộ sưu tập (collections), chỉnh sửa ảnh bìa, và cài đặt như một PWA (chơi được trên cả mobile/iOS).
+A browser-based retro game emulator — a Rust (Axum) backend serves your ROM library and a frontend lets you play games right in the browser. Includes a game library, playtime tracking, collections, cover-art editing, and PWA installation (works on mobile/iOS too).
 
-## Yêu cầu
+## Requirements
 
-- [Docker](https://docs.docker.com/get-docker/) (và Docker Compose, đi kèm Docker Desktop)
-- Một thư mục chứa ROM trên máy host để mount vào container
+- [Docker](https://docs.docker.com/get-docker/) (and Docker Compose, bundled with Docker Desktop)
+- A directory of ROMs on the host machine to mount into the container
 
-## Chạy nhanh với Docker Compose (khuyến nghị)
+## Quick start with Docker Compose (recommended)
 
-Image đã được build sẵn và đẩy lên GHCR, nên bạn không cần build lại.
+The image is pre-built and published to GHCR, so you don't need to build it yourself.
 
-1. Trỏ tới thư mục ROM của bạn rồi khởi chạy:
-
-   ```bash
-   ROM_DIR=/duong/dan/toi/roms docker compose up -d
-   ```
-
-   Nếu không đặt `ROM_DIR`, Compose mặc định dùng thư mục `./roms` trong repo này.
-
-2. Mở trình duyệt tại **http://localhost:3000**
-
-3. Xem log / dừng:
+1. Point it at your ROM directory and start it:
 
    ```bash
-   docker compose logs -f      # xem log
-   docker compose down         # dừng và xoá container
+   ROM_DIR=/path/to/roms docker compose up -d
    ```
 
-### Biến môi trường (Compose)
+   If you don't set `ROM_DIR`, Compose defaults to the `./roms` folder in this repo.
 
-| Biến             | Mặc định                              | Mô tả                                          |
-| ---------------- | ------------------------------------- | ---------------------------------------------- |
-| `ROM_DIR`        | `./roms`                              | Thư mục ROM trên host được mount vào `/roms`   |
-| `HOST_PORT`      | `3000`                                | Cổng trên host                                 |
-| `RETROWEB_IMAGE` | `ghcr.io/nyonnguyen/mygame:latest`    | Image dùng để chạy                             |
-| `RUST_LOG`       | `info`                                | Mức log (`info`, `debug`, `warn`...)           |
+2. Open your browser at **http://localhost:3000**
 
-Ví dụ đổi cổng và bật log debug:
+3. View logs / stop:
+
+   ```bash
+   docker compose logs -f      # tail logs
+   docker compose down         # stop and remove the container
+   ```
+
+### Environment variables (Compose)
+
+| Variable         | Default                               | Description                                      |
+| ---------------- | ------------------------------------- | ------------------------------------------------ |
+| `ROM_DIR`        | `./roms`                              | Host ROM directory mounted into `/roms`          |
+| `HOST_PORT`      | `3000`                                | Port on the host                                 |
+| `RETROWEB_IMAGE` | `ghcr.io/nyonnguyen/mygame:latest`    | Image to run                                     |
+| `RUST_LOG`       | `info`                                | Log level (`info`, `debug`, `warn`, ...)         |
+
+Example — change the port and enable debug logging:
 
 ```bash
 ROM_DIR=~/Documents/roms HOST_PORT=8080 RUST_LOG=debug docker compose up -d
 ```
 
-> Thư mục ROM được mount ở chế độ **chỉ đọc** (`:ro`) nên RetroWeb không thể sửa/xoá file ROM của bạn. Mọi dữ liệu khác (cài đặt, metadata, thời gian chơi, bộ sưu tập) được lưu trong Docker volume `retroweb-data`.
+> The ROM directory is mounted **read-only** (`:ro`), so RetroWeb can't modify or delete your ROM files. All other data (settings, metadata, playtime, collections) is stored in the `retroweb-data` Docker volume.
 
-## Chạy bằng `docker run` (không dùng Compose)
+## Running with `docker run` (without Compose)
 
 ```bash
 docker run -d \
   --name retroweb \
   -p 3000:3000 \
-  -v /duong/dan/toi/roms:/roms:ro \
+  -v /path/to/roms:/roms:ro \
   -v retroweb-data:/data \
   ghcr.io/nyonnguyen/mygame:latest
 ```
 
-- `-v /duong/dan/toi/roms:/roms:ro` — mount thư mục ROM của bạn vào `/roms` (chỉ đọc).
-- `-v retroweb-data:/data` — volume lưu cài đặt/metadata để giữ lại sau khi container restart.
-- Truy cập tại **http://localhost:3000**.
+- `-v /path/to/roms:/roms:ro` — mounts your ROM directory into `/roms` (read-only).
+- `-v retroweb-data:/data` — volume that stores settings/metadata so they persist across container restarts.
+- Access it at **http://localhost:3000**.
 
-## Tự build image (tuỳ chọn)
+## Building the image yourself (optional)
 
-Nếu muốn build từ source thay vì kéo image từ GHCR:
+If you'd rather build from source instead of pulling the image from GHCR:
 
 ```bash
-docker compose build          # hoặc: docker build -t retroweb .
+docker compose build          # or: docker build -t retroweb .
 docker compose up -d
 ```
 
-## Cấu trúc thư mục ROM
+## ROM directory layout
 
-RetroWeb quét **các thư mục con** bên trong thư mục ROM — mỗi thư mục con là một hệ máy (system). Tên thư mục nên khớp với mã hệ máy để được nhận diện đúng (tên đẹp + core emulator phù hợp):
+RetroWeb scans the **subdirectories** inside the ROM directory — each subdirectory is one system. Folder names should match the system code so they're recognized correctly (proper display name + matching emulator core):
 
 ```
 roms/
@@ -86,27 +86,27 @@ roms/
 └── psx/          # PlayStation
 ```
 
-Một số mã hệ máy được hỗ trợ: `nes`, `snes`, `gb`, `gbc`, `gba`, `n64`, `nds`, `genesis`, `megadrive`, `sms`, `gg`, `psx`, `psp`, `dreamcast`, `atari2600`, `arcade`, `mame`, `fbneo`.
+Some supported system codes: `nes`, `snes`, `gb`, `gbc`, `gba`, `n64`, `nds`, `genesis`, `megadrive`, `sms`, `gg`, `psx`, `psp`, `dreamcast`, `atari2600`, `arcade`, `mame`, `fbneo`.
 
-Các thư mục như `bios`, `themes`, `images`, `tools`, `backup`, `ports`, `videos`, `music`... sẽ tự động bị bỏ qua khi quét.
+Folders such as `bios`, `themes`, `images`, `tools`, `backup`, `ports`, `videos`, `music`, etc. are automatically skipped during scanning.
 
-## Các biến môi trường của ứng dụng
+## Application environment variables
 
-Image đặt sẵn các giá trị mặc định sau (thường không cần đổi khi chạy bằng Docker):
+The image ships with the following defaults (you usually don't need to change them when running via Docker):
 
-| Biến           | Mặc định (trong container) | Mô tả                                     |
-| -------------- | -------------------------- | ----------------------------------------- |
-| `ROM_DIR`      | `/roms`                    | Thư mục ROM bên trong container           |
-| `DATA_DIR`     | `/data`                    | Nơi lưu cài đặt, metadata, thời gian chơi |
-| `PORT`         | `3000`                     | Cổng HTTP của server                      |
-| `FRONTEND_DIR` | `/app/frontend/dist`       | Thư mục frontend đã build                 |
-| `RUST_LOG`     | `info`                     | Mức log                                   |
+| Variable       | Default (in container) | Description                                  |
+| -------------- | ---------------------- | -------------------------------------------- |
+| `ROM_DIR`      | `/roms`                | ROM directory inside the container           |
+| `DATA_DIR`     | `/data`                | Where settings, metadata, and playtime live  |
+| `PORT`         | `3000`                 | HTTP port of the server                      |
+| `FRONTEND_DIR` | `/app/frontend/dist`   | The built frontend directory                 |
+| `RUST_LOG`     | `info`                 | Log level                                    |
 
 ## Health check
 
-Container có sẵn healthcheck gọi `GET /api/health`. Kiểm tra trạng thái:
+The container ships with a healthcheck that calls `GET /api/health`. Check its status:
 
 ```bash
-docker ps          # cột STATUS sẽ hiển thị (healthy)
+docker ps          # the STATUS column shows (healthy)
 curl http://localhost:3000/api/health
 ```
