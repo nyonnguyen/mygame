@@ -85,7 +85,10 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target ${{ matrix.target }} 2>&1 | tee build.log
 
       # ── Assemble the runnable package ────────────────────────────────
       - name: Assemble package
@@ -127,6 +130,33 @@ jobs:
             dist/RetroWeb-${{ matrix.label }}.zip
           if-no-files-found: error
           retention-days: 30
+
+      # ── Diagnostics: write a per-platform result to the run Summary tab ──
+      # so failures are visible without digging through logs. On a cargo
+      # failure the last lines of the build error are printed inline.
+      - name: Report result to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.label }} (${{ matrix.target }})"
+            if ls dist/RetroWeb-${{ matrix.label }}.* >/dev/null 2>&1; then
+              echo "Status: ✅ artifact produced"
+              echo '```'
+              ls -lh dist/RetroWeb-${{ matrix.label }}.* | awk '{print $5, $9}'
+              echo '```'
+            else
+              echo "Status: ❌ no artifact (build failed before packaging)"
+              if [ -f build.log ]; then
+                echo "<details><summary>cargo build — last 40 lines</summary>"
+                echo
+                echo '```'
+                tail -n 40 build.log
+                echo '```'
+                echo "</details>"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ── Publish a rolling "latest" pre-release on every push to default ──
   release-latest:
