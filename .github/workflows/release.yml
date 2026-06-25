@@ -44,8 +44,11 @@ jobs:
             target: aarch64-apple-darwin
             bin: retroweb
             archive: tar
+          # Intel macOS: cross-compiled on the Apple Silicon runner instead of
+          # the deprecated macos-13 Intel runner. The Xcode SDK is universal, so
+          # `cargo build --target x86_64-apple-darwin` produces an Intel binary.
           - label: macos-x64
-            os: macos-13
+            os: macos-14
             target: x86_64-apple-darwin
             bin: retroweb
             archive: tar
