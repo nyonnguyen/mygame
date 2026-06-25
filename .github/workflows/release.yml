@@ -220,15 +220,24 @@ jobs:
           | Linux (x64) | RetroWeb-linux-x64.tar.gz |" \
             artifacts/*
 
-  # ── Publish a permanent versioned release when a v* tag is pushed ────
+  # ── Publish a permanent, auto-numbered versioned release ─────────────
+  # Runs on every push to the default branch (auto-assigning a version
+  # number) AND on a manually pushed v* tag (using that exact tag).
   release-tag:
     name: Publish tagged release
     needs: build
-    # always(): publish the tagged release with whatever platforms built
-    # successfully, even if one leg failed — same lenient behaviour as latest.
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    # always(): publish with whatever platforms built successfully, even if one
+    # leg failed — same lenient behaviour as latest.
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       github.ref == 'refs/heads/master' ||
+       github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -249,14 +258,35 @@ jobs:
           echo "have=true" >> "$GITHUB_OUTPUT"
           printf '%s\n' "${files[@]}"
 
+      - name: Compute release version
+        id: version
+        run: |
+          set -e
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # Manual tag push: use the tag verbatim (e.g. v1.2.3).
+            TAG="$GITHUB_REF_NAME"
+          else
+            # Auto: <major.minor> from Cargo.toml + the run number as the patch,
+            # giving a monotonically increasing tag like v0.1.42.
+            MM=$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml \
+                 | sed -E 's/.*"([0-9]+)\.([0-9]+).*/\1.\2/')
+            TAG="v${MM}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "Release tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Publish release
         if: steps.collect.outputs.have == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -e
-          gh release create "${GITHUB_REF_NAME}" \
+          # gh creates the git tag at this commit if it doesn't exist yet.
+          # (Tags created via GITHUB_TOKEN don't re-trigger the workflow.)
+          gh release create "$TAG" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "RetroWeb ${GITHUB_REF_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "RetroWeb $TAG" \
             --generate-notes \
             artifacts/*
